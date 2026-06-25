@@ -66,7 +66,8 @@ def build_client_payload(order: Order, client_uuid: str, client_email: str, expi
         'totalGB': int(order.traffic_bytes or 0),
         'expiryTime': int(expiry_ms),
         'limitIp': int(order.user_limit or 0),
-        'tgId': str(order.user.chat_id or ''),
+        # 3x-ui v3 Go model requires tgId as int64, not string.
+        'tgId': int(order.user.chat_id or 0),
         'subId': str(client_email).strip(),
         'flow': '',
         'reset': 0,

@@ -79,7 +79,7 @@ class Command(BaseCommand):
             'totalGB': 1024 * 1024 * 10,
             'expiryTime': int((time.time() + 3600) * 1000),
             'limitIp': 1,
-            'tgId': '',
+            'tgId': 0,
             'reset': 0,
             'flow': '',
             'comment': 'vpnshop api probe - can delete',

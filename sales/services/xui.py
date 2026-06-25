@@ -144,7 +144,11 @@ class XUIClient:
         expiry_time = int(client_payload.get('expiryTime') or 0)
         limit_ip = int(client_payload.get('limitIp') or 0)
         reset = int(client_payload.get('reset') or 0)
-        tg_id = client_payload.get('tgId') or ''
+        raw_tg_id = client_payload.get('tgId', 0)
+        try:
+            tg_id = int(raw_tg_id or 0)
+        except (TypeError, ValueError):
+            tg_id = 0
         sub_id = str(client_payload.get('subId') or email).strip() or email
         enable = bool(client_payload.get('enable', True))
         flow = str(client_payload.get('flow') or '')
@@ -156,7 +160,9 @@ class XUIClient:
             'totalGB': total_gb,
             'expiryTime': expiry_time,
             'limitIp': limit_ip,
-            'tgId': str(tg_id),
+            # 3x-ui Go model expects tgId as int64. Sending it as a string
+            # makes clients/add fail with: cannot unmarshal string into ... int64.
+            'tgId': tg_id,
             'reset': reset,
             'flow': flow,
             'comment': str(client_payload.get('comment') or ''),
@@ -303,6 +309,11 @@ class XUIClient:
         client_payload.setdefault('reset', 0)
         client_payload.setdefault('up', 0)
         client_payload.setdefault('down', 0)
+        for int_key in ('totalGB', 'expiryTime', 'limitIp', 'reset', 'up', 'down', 'tgId'):
+            try:
+                client_payload[int_key] = int(client_payload.get(int_key) or 0)
+            except (TypeError, ValueError):
+                client_payload[int_key] = 0
 
         errors: list[str] = []
         # Prefer 3.x global client API because current 3x-ui versions moved user
@@ -326,6 +337,11 @@ class XUIClient:
     def update_client(self, email: str, client_payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(client_payload)
         body['email'] = email
+        for int_key in ('totalGB', 'expiryTime', 'limitIp', 'reset', 'up', 'down', 'tgId'):
+            try:
+                body[int_key] = int(body.get(int_key) or 0)
+            except (TypeError, ValueError):
+                body[int_key] = 0
         attempts = [
             ('POST', self._api_url(f'/clients/update/{email}'), {'json': body, 'headers': {'Content-Type': 'application/json'}}),
             ('PUT', self._api_url(f'/clients/{email}'), {'json': body, 'headers': {'Content-Type': 'application/json'}}),
