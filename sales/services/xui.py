@@ -60,7 +60,16 @@ class XUIClient:
         try:
             with httpx.Client(timeout=self.timeout, verify=self.panel.verify_ssl) as client:
                 response = client.request(method, url, headers=headers, **kwargs)
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    body = (response.text or '').strip().replace('\n', ' ')
+                    if len(body) > 500:
+                        body = body[:500] + '…'
+                    raise XUIError(
+                        f'خطا در ارتباط با 3x-ui: HTTP {response.status_code} برای {method.upper()} {url}'
+                        + (f' | body={body}' if body else '')
+                    ) from exc
                 text = (response.text or '').strip()
                 if not text:
                     return {'success': True}
@@ -68,6 +77,8 @@ class XUIClient:
                     return response.json()
                 except Exception:
                     return {'success': True, 'raw': text}
+        except XUIError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise XUIError(f'خطا در ارتباط با 3x-ui: {exc}') from exc
 
@@ -197,30 +208,62 @@ class XUIClient:
 
     def _add_client_v3(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
         email = str(client_payload['email']).strip()
-        last_error = None
-        create_paths = ('/clients/add', '/client/add', '/clients')
-        for path in create_paths:
-            for payload in self._client_v3_payloads(inbound_id, client_payload):
-                # Current 3x-ui 3.x uses JSON only; do not send form-urlencoded
-                # to this endpoint because Gin will try to parse `email=...` as
-                # JSON and return: invalid character 'e' looking for beginning of value.
-                try:
-                    result = self.request('POST', self._api_url(path), json=payload, headers={'Content-Type': 'application/json'})
-                    if self._ok(result):
-                        try:
-                            got = self.get_client(email)
-                            uuid_value = self._extract_uuid(got)
-                        except XUIError:
-                            uuid_value = self._extract_uuid(result)
-                        if uuid_value:
-                            result['client_uuid'] = uuid_value
-                        result['client_email'] = email
-                        result['api_mode'] = 'clients-v3-add'
-                        return result
-                    last_error = XUIError(str(result))
-                except XUIError as exc:
-                    last_error = exc
-        raise XUIError(str(last_error))
+
+        # The API Docs exported from the target panel expose POST /panel/api/clients/add.
+        # There is no documented POST /panel/api/clients route, so do not call it here.
+        # The previous fallback to /clients made the final error misleading and could
+        # hide the real /clients/add response.
+        primary_payloads = self._client_v3_payloads(inbound_id, client_payload)
+        attempts: list[str] = []
+
+        for payload in primary_payloads:
+            url = self._api_url('/clients/add')
+            try:
+                result = self.request('POST', url, json=payload, headers={'Content-Type': 'application/json'})
+                if self._ok(result):
+                    try:
+                        got = self.get_client(email)
+                        uuid_value = self._extract_uuid(got)
+                    except XUIError:
+                        uuid_value = self._extract_uuid(result)
+                    if uuid_value:
+                        result['client_uuid'] = uuid_value
+                    result['client_email'] = email
+                    result['api_mode'] = 'clients-v3-add'
+                    return result
+                attempts.append(f'POST {url} payload_keys={list(payload.keys())}: {result}')
+            except XUIError as exc:
+                attempts.append(f'POST {url} payload_keys={list(payload.keys())}: {exc}')
+
+        # Some newer/forked panels also expose /clients/bulkCreate. Try it as a
+        # documented backup with array and object wrappers.
+        single = primary_payloads[0]
+        bulk_payloads = [
+            [single],
+            {'items': [single]},
+            {'clients': [single]},
+            {'data': [single]},
+        ]
+        bulk_url = self._api_url('/clients/bulkCreate')
+        for payload in bulk_payloads:
+            try:
+                result = self.request('POST', bulk_url, json=payload, headers={'Content-Type': 'application/json'})
+                if self._ok(result):
+                    try:
+                        got = self.get_client(email)
+                        uuid_value = self._extract_uuid(got)
+                    except XUIError:
+                        uuid_value = self._extract_uuid(result)
+                    if uuid_value:
+                        result['client_uuid'] = uuid_value
+                    result['client_email'] = email
+                    result['api_mode'] = 'clients-v3-bulkCreate'
+                    return result
+                attempts.append(f'POST {bulk_url} type={type(payload).__name__}: {result}')
+            except XUIError as exc:
+                attempts.append(f'POST {bulk_url} type={type(payload).__name__}: {exc}')
+
+        raise XUIError(' | '.join(attempts[-10:]))
 
     def _add_client_legacy(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
         settings_obj = {'clients': [client_payload]}

@@ -1,5 +1,6 @@
-v0.1.4
-- اصلاح مسیر و payload ساخت Client در 3x-ui نسخه‌های 3.3.x: POST /panel/api/clients/add با بدنه {client, inboundIds}
-- حذف ارسال form-urlencoded به API جدید clients/add برای جلوگیری از خطای invalid character 'e'
-- حفظ fallback به API قدیمی inbounds/addClient برای نسخه‌های 2.x
-- جلوگیری از قطع شدن polling ربات هنگام خطای Telegram callback قدیمی/منقضی‌شده
+v0.1.5
+- اصلاح مسیر ساخت Client بر اساس API Docs پنل 3x-ui کاربر.
+- حذف تلاش روی endpoint غیرمستند /panel/api/clients.
+- اضافه شدن bulkCreate fallback.
+- خطایابی دقیق‌تر پاسخ HTTP پنل 3x-ui.
+- اضافه شدن command جدید xui_probe برای تست اتصال، مسیرها و ساخت کلاینت آزمایشی.
