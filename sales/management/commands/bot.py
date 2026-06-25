@@ -57,6 +57,16 @@ def inline(rows: list[list[tuple[str, str]]]) -> types.InlineKeyboardMarkup:
     return kb
 
 
+def safe_answer_callback(bot: telebot.TeleBot, call, text: str | None = None) -> None:
+    """Answer callback query without killing polling on expired Telegram queries."""
+    try:
+        bot.answer_callback_query(call.id, text=text)
+    except Exception:
+        # Telegram returns 400 when the callback is too old or was already answered.
+        # This should not stop the whole bot polling loop.
+        pass
+
+
 def main_reply_keyboard() -> types.ReplyKeyboardMarkup:
     """Persistent Telegram keyboard shown in the chat input area.
 
@@ -426,7 +436,7 @@ class Command(BaseCommand):
         def callback(call):
             user = ensure_user_from_call(call)
             data = call.data or ''
-            bot.answer_callback_query(call.id)
+            safe_answer_callback(bot, call)
             site_now = get_site()
 
             if data == 'cancel':

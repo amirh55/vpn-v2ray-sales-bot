@@ -120,6 +120,14 @@ class XUIClient:
         raise XUIError(str(last_error))
 
     def _client_v3_payloads(self, inbound_id: int, client_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return payloads for current 3x-ui 3.x Clients API.
+
+        In 3x-ui v3.3.x the router is POST /panel/api/clients/add and the
+        controller binds JSON into service.ClientCreatePayload, whose shape is
+        {"client": model.Client, "inboundIds": []int}. Sending `email` at
+        top-level makes the panel bind an empty Client and then it returns
+        `client email is required`.
+        """
         email = str(client_payload['email']).strip()
         total_gb = int(client_payload.get('totalGB') or 0)
         expiry_time = int(client_payload.get('expiryTime') or 0)
@@ -130,7 +138,7 @@ class XUIClient:
         enable = bool(client_payload.get('enable', True))
         flow = str(client_payload.get('flow') or '')
 
-        base = {
+        client = {
             'email': email,
             'subId': sub_id,
             'enable': enable,
@@ -141,17 +149,21 @@ class XUIClient:
             'reset': reset,
             'flow': flow,
             'comment': str(client_payload.get('comment') or ''),
-            # Keep this for forks/builds that accept caller supplied UUID.
-            'id': str(client_payload.get('id') or ''),
+            'groupName': str(client_payload.get('groupName') or ''),
         }
-        # Newer 3.x builds use a client-level API. Different builds/forks used
-        # slightly different names for the selected inbound list, so try all.
+
+        # Current official v3 shape. The extra variants are defensive for forks
+        # that keep Go field casing or accept a supplied UUID.
+        supplied_id = str(client_payload.get('id') or '').strip()
+        client_with_id = dict(client)
+        if supplied_id:
+            client_with_id['id'] = supplied_id
+
         return [
-            {**base, 'inboundIds': [int(inbound_id)]},
-            {**base, 'inbounds': [int(inbound_id)]},
-            {**base, 'attachedInbounds': [int(inbound_id)]},
-            {**base, 'inbound_ids': [int(inbound_id)]},
-            dict(base),
+            {'client': client, 'inboundIds': [int(inbound_id)]},
+            {'client': client_with_id, 'inboundIds': [int(inbound_id)]},
+            {'Client': client, 'InboundIds': [int(inbound_id)]},
+            {'client': client, 'inbounds': [int(inbound_id)]},
         ]
 
     def _attach_client_to_inbound(self, email: str, inbound_id: int) -> dict[str, Any]:
@@ -186,19 +198,15 @@ class XUIClient:
     def _add_client_v3(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
         email = str(client_payload['email']).strip()
         last_error = None
-        create_paths = ('/clients', '/clients/', '/client', '/client/add', '/clients/add')
-        for payload in self._client_v3_payloads(inbound_id, client_payload):
-            for path in create_paths:
-                # JSON request used by current 3.x API and in-panel Swagger.
+        create_paths = ('/clients/add', '/client/add', '/clients')
+        for path in create_paths:
+            for payload in self._client_v3_payloads(inbound_id, client_payload):
+                # Current 3x-ui 3.x uses JSON only; do not send form-urlencoded
+                # to this endpoint because Gin will try to parse `email=...` as
+                # JSON and return: invalid character 'e' looking for beginning of value.
                 try:
                     result = self.request('POST', self._api_url(path), json=payload, headers={'Content-Type': 'application/json'})
                     if self._ok(result):
-                        # Some builds create the client but do not attach it when the
-                        # selected inbound key name differs; attach defensively.
-                        try:
-                            self._attach_client_to_inbound(email, inbound_id)
-                        except XUIError:
-                            pass
                         try:
                             got = self.get_client(email)
                             uuid_value = self._extract_uuid(got)
@@ -207,26 +215,7 @@ class XUIClient:
                         if uuid_value:
                             result['client_uuid'] = uuid_value
                         result['client_email'] = email
-                        result['api_mode'] = 'clients-v3'
-                        return result
-                    last_error = XUIError(str(result))
-                except XUIError as exc:
-                    last_error = exc
-                # Some proxies/forks only parse form-urlencoded bodies.
-                try:
-                    result = self.request(
-                        'POST',
-                        self._api_url(path),
-                        data={k: json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v for k, v in payload.items()},
-                        headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                    )
-                    if self._ok(result):
-                        try:
-                            self._attach_client_to_inbound(email, inbound_id)
-                        except XUIError:
-                            pass
-                        result['client_email'] = email
-                        result['api_mode'] = 'clients-v3-form'
+                        result['api_mode'] = 'clients-v3-add'
                         return result
                     last_error = XUIError(str(result))
                 except XUIError as exc:

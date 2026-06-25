@@ -1,6 +1,5 @@
-v0.1.3
-- پشتیبانی از API جدید 3x-ui 3.x برای ساخت Client از مسیر /panel/api/clients
-- اتصال دفاعی کلاینت ساخته‌شده به inbound با مسیرهای attach مختلف
-- حفظ پشتیبانی از API قدیمی /inbounds/addClient برای نسخه‌های 2.x
-- ارسال form-urlencoded برای buildهایی که JSON را درست parse نمی‌کنند
-- ثبت UUID واقعی برگشتی از پنل 3x-ui در صورت موجود بودن
+v0.1.4
+- اصلاح مسیر و payload ساخت Client در 3x-ui نسخه‌های 3.3.x: POST /panel/api/clients/add با بدنه {client, inboundIds}
+- حذف ارسال form-urlencoded به API جدید clients/add برای جلوگیری از خطای invalid character 'e'
+- حفظ fallback به API قدیمی inbounds/addClient برای نسخه‌های 2.x
+- جلوگیری از قطع شدن polling ربات هنگام خطای Telegram callback قدیمی/منقضی‌شده
