@@ -118,7 +118,10 @@ def provision_order(order: Order) -> Order:
 
     payload = build_client_payload(order, client_uuid, client_email, expires_at)
     xui = XUIClient(order.service.panel)
-    xui.add_client(order.service.inbound_id, payload)
+    xui_result = xui.add_client(order.service.inbound_id, payload)
+    actual_uuid = str(xui_result.get('client_uuid') or '').strip()
+    if actual_uuid:
+        client_uuid = actual_uuid
 
     order.xui_client_uuid = client_uuid
     order.xui_client_email = client_email

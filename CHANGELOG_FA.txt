@@ -1,12 +1,6 @@
-v0.1.2 - پایداری تنظیمات سرور و منوی اصلی تلگرام
-
-- تنظیمات، دیتابیس SQLite و فایل‌های media به مسیر پایدار /var/lib/vpnshop منتقل شدند.
-- فایل .env پروژه دیگر منبع اصلی تنظیمات عملیاتی نیست؛ /var/lib/vpnshop/.env روی آن override می‌شود.
-- command جدید runtime_prepare برای آماده‌سازی مسیر پایدار و کپی دیتای فعلی اضافه شد.
-- خطای sales.urls با قرار دادن فایل sales/urls.py در Patch رفع شد.
-- فایل‌های __init__.py برای کشف درست management command ربات اضافه شدند.
-- اسکریپت‌های scripts/run_panel.sh و scripts/run_bot.sh اضافه شدند.
-- ecosystem.config.js برای اجرای استاندارد PM2 اضافه شد.
-- دکمه‌های اصلی ربات از InlineKeyboard زیر پیام خوش‌آمد به ReplyKeyboard منوی پایین تلگرام منتقل شدند.
-- command menu تلگرام برای /new، /wallet، /services، /renew، /tutorial و /contact تنظیم می‌شود.
-- اصلاح قبلی 3x-ui برای client email امن و غیرخالی حفظ شد.
+v0.1.3
+- پشتیبانی از API جدید 3x-ui 3.x برای ساخت Client از مسیر /panel/api/clients
+- اتصال دفاعی کلاینت ساخته‌شده به inbound با مسیرهای attach مختلف
+- حفظ پشتیبانی از API قدیمی /inbounds/addClient برای نسخه‌های 2.x
+- ارسال form-urlencoded برای buildهایی که JSON را درست parse نمی‌کنند
+- ثبت UUID واقعی برگشتی از پنل 3x-ui در صورت موجود بودن
