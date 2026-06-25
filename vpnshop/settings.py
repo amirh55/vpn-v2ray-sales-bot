@@ -3,7 +3,17 @@ import os
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / '.env')
+
+# Runtime/persistent configuration:
+# - Project files can be updated from GitHub safely.
+# - Secrets, SQLite DB, media, and operational data should live outside Git.
+# - Override with VPNSHOP_RUNTIME_DIR if you want a different location.
+RUNTIME_DIR = Path(os.getenv('VPNSHOP_RUNTIME_DIR', '/var/lib/vpnshop'))
+
+# Loading order: project defaults first, then server-level files override them.
+load_dotenv(BASE_DIR / '.env', override=False)
+load_dotenv(Path('/etc/vpnshop/vpnshop.env'), override=True)
+load_dotenv(RUNTIME_DIR / '.env', override=True)
 
 SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-change-me')
 DEBUG = os.getenv('DEBUG', '1') == '1'
@@ -55,7 +65,7 @@ ASGI_APPLICATION = 'vpnshop.asgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': os.getenv('SQLITE_DB_PATH', str(RUNTIME_DIR / 'db.sqlite3')),
     }
 }
 
@@ -72,12 +82,13 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = 'static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATIC_ROOT = Path(os.getenv('STATIC_ROOT', str(BASE_DIR / 'staticfiles')))
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_ROOT = Path(os.getenv('MEDIA_ROOT', str(RUNTIME_DIR / 'media')))
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 LOGIN_REDIRECT_URL = '/admin/'
-CSRF_TRUSTED_ORIGINS = [u for u in [os.getenv('PUBLIC_BASE_URL')] if u and u.startswith('http')]
+_csrf_public = os.getenv('PUBLIC_BASE_URL')
+CSRF_TRUSTED_ORIGINS = [u for u in [_csrf_public] if u and u.startswith('http')]
 
 # Production hints: set DEBUG=0, use PostgreSQL, HTTPS, and a process manager.

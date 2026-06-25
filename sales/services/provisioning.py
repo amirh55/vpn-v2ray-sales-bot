@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from decimal import Decimal
 from django.utils import timezone
@@ -40,19 +41,37 @@ def render_template(template: str, *, order: Order, client_uuid: str, client_ema
         raise XUIError(f'متغیر قالب لینک اشتباه است: {exc}') from exc
 
 
+def make_safe_xui_email(order: Order, client_uuid: str) -> str:
+    """Build a safe, non-empty 3x-ui client email/remark.
+
+    In 3x-ui this field is called `email`, but it is used as the client
+    identifier/remark. Some panel versions are sensitive to special characters
+    and may reject values that look empty after validation. Keep it short,
+    ASCII-only, and unique.
+    """
+    raw = f'u{order.user.chat_id}o{order.pk}{client_uuid[:8]}'
+    safe = re.sub(r'[^A-Za-z0-9-]', '', raw).lower()
+    return safe[:64] or f'u{client_uuid.replace('-', '')[:12]}'
+
+
 def build_client_payload(order: Order, client_uuid: str, client_email: str, expires_at) -> dict:
+    if not client_email or not str(client_email).strip():
+        raise XUIError('شناسه client email برای 3x-ui خالی است.')
     expiry_ms = int(expires_at.timestamp() * 1000) if expires_at else 0
     return {
-        'id': client_uuid,
-        'email': client_email,
+        'id': str(client_uuid),
+        'alterId': 0,
+        'email': str(client_email).strip(),
         'enable': True,
-        'totalGB': order.traffic_bytes,
-        'expiryTime': expiry_ms,
-        'limitIp': order.user_limit,
-        'tgId': str(order.user.chat_id),
-        'subId': client_email,
+        'totalGB': int(order.traffic_bytes or 0),
+        'expiryTime': int(expiry_ms),
+        'limitIp': int(order.user_limit or 0),
+        'tgId': str(order.user.chat_id or ''),
+        'subId': str(client_email).strip(),
         'flow': '',
         'reset': 0,
+        'up': 0,
+        'down': 0,
     }
 
 
@@ -92,7 +111,7 @@ def provision_order(order: Order) -> Order:
         return order
 
     client_uuid = order.xui_client_uuid or str(uuid.uuid4())
-    client_email = order.xui_client_email or f'u{order.user.chat_id}_{order.pk}_{client_uuid[:8]}'
+    client_email = order.xui_client_email or make_safe_xui_email(order, client_uuid)
     expires_at = timezone.now() + timezone.timedelta(days=order.plan.duration_days)
     order.traffic_bytes = gb_to_bytes(order.plan.traffic_gb)
     order.user_limit = order.plan.user_limit

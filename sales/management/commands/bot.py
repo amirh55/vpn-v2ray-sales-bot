@@ -26,12 +26,57 @@ from sales.services.formatting import days_text, fa_digits, parse_toman, toman, 
 from sales.services.oxapay import OxaPayError, create_invoice, toman_to_usd
 from sales.services.provisioning import create_order_from_wallet, provision_order, renew_order_from_wallet
 
+BTN_NEW = '🛒 خرید اشتراک جدید'
+BTN_RENEW = '🔁 تمدید اشتراک'
+BTN_WALLET = '💳 کیف پول + شارژ'
+BTN_SERVICES = '📦 سرویس‌های من'
+BTN_TUTORIAL = '📚 آموزش اتصال'
+BTN_CONTACT = '☎️ ارتباط با ما'
+BTN_CANCEL = 'لغو و بازگشت'
+
+MAIN_TEXT_ACTIONS = {
+    BTN_NEW: 'new',
+    BTN_RENEW: 'renew',
+    BTN_WALLET: 'wallet',
+    BTN_SERVICES: 'services',
+    BTN_TUTORIAL: 'tutorial',
+    BTN_CONTACT: 'contact',
+    '/new': 'new',
+    '/renew': 'renew',
+    '/wallet': 'wallet',
+    '/services': 'services',
+    '/tutorial': 'tutorial',
+    '/contact': 'contact',
+}
+
 
 def inline(rows: list[list[tuple[str, str]]]) -> types.InlineKeyboardMarkup:
     kb = types.InlineKeyboardMarkup()
     for row in rows:
         kb.row(*[types.InlineKeyboardButton(text, callback_data=data) for text, data in row])
     return kb
+
+
+def main_reply_keyboard() -> types.ReplyKeyboardMarkup:
+    """Persistent Telegram keyboard shown in the chat input area.
+
+    This keeps the main buttons in Telegram's menu/keyboard area instead of
+    attaching them under the welcome message as inline buttons.
+    """
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
+    kb.row(BTN_NEW)
+    kb.row(BTN_RENEW, BTN_WALLET)
+    kb.row(BTN_SERVICES, BTN_TUTORIAL)
+    kb.row(BTN_CONTACT)
+    return kb
+
+
+def cancel_keyboard() -> types.InlineKeyboardMarkup:
+    return inline([[('لغو و بازگشت', 'cancel')]])
+
+
+def home_inline_keyboard() -> types.InlineKeyboardMarkup:
+    return inline([[('🏠 منوی اصلی', 'cancel')]])
 
 
 def get_site() -> SiteSetting:
@@ -62,17 +107,10 @@ def ensure_user_from_call(call) -> TelegramUser:
     return user
 
 
-def main_menu_keyboard() -> types.InlineKeyboardMarkup:
-    return inline([
-        [('🛒 خرید اشتراک جدید', 'new')],
-        [('🔁 تمدید اشتراک', 'renew'), ('💳 کیف پول + شارژ', 'wallet')],
-        [('📦 سرویس‌های من', 'services'), ('📚 آموزش اتصال', 'tutorial')],
-        [('☎️ ارتباط با ما', 'contact')],
-    ])
-
-
-def cancel_keyboard() -> types.InlineKeyboardMarkup:
-    return inline([[('لغو و بازگشت', 'cancel')]])
+def reset_user_state(user: TelegramUser):
+    user.state = ''
+    user.temp_data = {}
+    user.save(update_fields=['state', 'temp_data', 'updated_at'])
 
 
 def plan_text(plan: Plan) -> str:
@@ -88,15 +126,32 @@ def plan_text(plan: Plan) -> str:
 
 def send_main_menu(bot: TeleBot, chat_id: int):
     site = get_site()
-    text = f'سلام 🌿\nبه <b>{site.title}</b> خوش آمدید.\nیکی از گزینه‌ها را انتخاب کنید:'
-    bot.send_message(chat_id, text, reply_markup=main_menu_keyboard())
+    text = (
+        f'سلام 🌿\n'
+        f'به <b>{site.title}</b> خوش آمدید.\n'
+        f'دکمه‌های اصلی ربات از منوی پایین تلگرام در دسترس هستند.'
+    )
+    bot.send_message(chat_id, text, reply_markup=main_reply_keyboard())
 
 
 def edit_or_send(bot: TeleBot, call, text: str, kb=None):
     try:
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, reply_markup=kb, disable_web_page_preview=True)
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
     except Exception:
         bot.send_message(call.message.chat.id, text, reply_markup=kb, disable_web_page_preview=True)
+
+
+def send_or_edit(bot: TeleBot, chat_id: int, text: str, kb=None, call=None):
+    if call is not None:
+        edit_or_send(bot, call, text, kb)
+    else:
+        bot.send_message(chat_id, text, reply_markup=kb, disable_web_page_preview=True)
 
 
 def create_oxapay_payment(user: TelegramUser, amount_toman: int, pending_plan: Plan | None = None, auto_purchase: bool = False) -> Payment:
@@ -143,7 +198,7 @@ def send_delivery(bot: TeleBot, chat_id: int, order: Order):
         text += f'\n🔄 <b>لینک Subscription:</b>\n<code>{order.subscription_link}</code>\n'
     if not order.config_link and not order.subscription_link:
         text += '\n⚠️ لینک کانفیگ/سابسکریپشن ساخته نشد. قالب لینک را در پنل مدیریت سرویس تنظیم کنید.'
-    bot.send_message(chat_id, text, disable_web_page_preview=True)
+    bot.send_message(chat_id, text, reply_markup=main_reply_keyboard(), disable_web_page_preview=True)
     if order.qr_image:
         try:
             with open(order.qr_image.path, 'rb') as fh:
@@ -152,12 +207,91 @@ def send_delivery(bot: TeleBot, chat_id: int, order: Order):
             pass
 
 
+def show_new_services(bot: TeleBot, chat_id: int, call=None):
+    services = Service.objects.filter(is_active=True, plans__is_active=True).distinct().order_by('sort_order', 'name')
+    rows = [[(f'🟢 {s.name}', f'svc:{s.pk}')] for s in services]
+    rows.append([('بازگشت', 'cancel')])
+    send_or_edit(bot, chat_id, 'سرویس مورد نظر را انتخاب کنید:', inline(rows), call=call)
+
+
+def show_wallet(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
+    site_now = get_site()
+    user.refresh_from_db()
+    rows = [
+        [('۱۰۰ هزار', 'topup:100000'), ('۵۰۰ هزار', 'topup:500000')],
+        [('۱ میلیون', 'topup:1000000'), ('۲ میلیون', 'topup:2000000')],
+        [('مبلغ دلخواه', 'topup_custom')],
+    ]
+    if site_now.card_to_card_enabled:
+        rows.append([('کارت‌به‌کارت', 'card_amount')])
+    rows.append([('بازگشت', 'cancel')])
+    send_or_edit(bot, chat_id, f'💳 موجودی کیف پول شما: {toman(user.wallet_balance_toman)}\nمبلغ شارژ را انتخاب کنید:', inline(rows), call=call)
+
+
+def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
+    orders = Order.objects.filter(user=user, status=Order.Status.PROVISIONED).select_related('plan', 'service').order_by('-created_at')[:10]
+    if not orders:
+        send_or_edit(bot, chat_id, 'هنوز سرویس فعالی ندارید.', home_inline_keyboard(), call=call)
+        return
+    rows = []
+    text = '📦 سرویس‌های شما:\n\n'
+    for o in orders:
+        exp = fa_digits(timezone.localtime(o.expires_at).strftime('%Y-%m-%d')) if o.expires_at else 'بدون تاریخ'
+        text += f'#{fa_digits(o.pk)} - {o.service.name} / {o.plan.name} / انقضا: {exp}\n'
+        rows.append([(f'ارسال مجدد لینک #{o.pk}', f'resend:{o.pk}')])
+    rows.append([('بازگشت', 'cancel')])
+    send_or_edit(bot, chat_id, text, inline(rows), call=call)
+
+
+def show_renew(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
+    orders = Order.objects.filter(user=user, status=Order.Status.PROVISIONED).select_related('plan', 'service').order_by('-created_at')[:10]
+    if not orders:
+        send_or_edit(bot, chat_id, 'برای تمدید، ابتدا باید یک سرویس فعال داشته باشید.', home_inline_keyboard(), call=call)
+        return
+    rows = [[(f'{o.service.name} / {o.plan.name} #{o.pk}', f'reneword:{o.pk}')] for o in orders]
+    rows.append([('بازگشت', 'cancel')])
+    send_or_edit(bot, chat_id, 'کدام سرویس را تمدید می‌کنید؟', inline(rows), call=call)
+
+
+def show_tutorial(bot: TeleBot, chat_id: int, call=None):
+    site_now = get_site()
+    send_or_edit(bot, chat_id, site_now.tutorial_text or 'آموزش اتصال هنوز تنظیم نشده است.', home_inline_keyboard() if call else None, call=call)
+
+
+def show_contact(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
+    site_now = get_site()
+    user.state = 'awaiting_contact'
+    user.temp_data = {}
+    user.save(update_fields=['state', 'temp_data', 'updated_at'])
+    send_or_edit(bot, chat_id, site_now.contact_intro_text, cancel_keyboard(), call=call)
+
+
+def route_main_action(bot: TeleBot, user: TelegramUser, chat_id: int, action: str):
+    site_now = get_site()
+    if not site_now.is_shop_active and action not in ['contact', 'tutorial']:
+        bot.send_message(chat_id, 'فروشگاه موقتاً غیرفعال است. لطفاً بعداً مراجعه کنید.', reply_markup=main_reply_keyboard())
+        return
+    if action == 'new':
+        show_new_services(bot, chat_id)
+    elif action == 'wallet':
+        show_wallet(bot, user, chat_id)
+    elif action == 'services':
+        show_my_services(bot, user, chat_id)
+    elif action == 'renew':
+        show_renew(bot, user, chat_id)
+    elif action == 'tutorial':
+        show_tutorial(bot, chat_id)
+    elif action == 'contact':
+        show_contact(bot, user, chat_id)
+    else:
+        send_main_menu(bot, chat_id)
+
+
 def process_queued_broadcasts(bot: TeleBot):
     while True:
         try:
             for bc in Broadcast.objects.filter(status=Broadcast.Status.QUEUED).order_by('created_at')[:5]:
                 sent = failed = 0
-                targets = []
                 if bc.target_chat_id.strip():
                     targets = [bc.target_chat_id.strip()]
                 else:
@@ -188,21 +322,48 @@ class Command(BaseCommand):
             raise CommandError('توکن ربات تلگرام را در /admin/ بخش تنظیمات اصلی ثبت کنید.')
 
         bot = TeleBot(site.telegram_bot_token, parse_mode='HTML')
+        try:
+            bot.set_my_commands([
+                types.BotCommand('start', 'شروع و نمایش منو'),
+                types.BotCommand('new', 'خرید اشتراک جدید'),
+                types.BotCommand('wallet', 'کیف پول و شارژ'),
+                types.BotCommand('services', 'سرویس‌های من'),
+                types.BotCommand('renew', 'تمدید اشتراک'),
+                types.BotCommand('tutorial', 'آموزش اتصال'),
+                types.BotCommand('contact', 'ارتباط با ما'),
+            ])
+        except Exception:
+            pass
         threading.Thread(target=process_queued_broadcasts, args=(bot,), daemon=True).start()
 
         @bot.message_handler(commands=['start', 'menu'])
         def start(message):
             user = ensure_user_from_message(message)
-            user.state = ''
-            user.temp_data = {}
-            user.save(update_fields=['state', 'temp_data', 'updated_at'])
+            reset_user_state(user)
             send_main_menu(bot, message.chat.id)
+
+        @bot.message_handler(commands=['new', 'renew', 'wallet', 'services', 'tutorial', 'contact'])
+        def command_router(message):
+            user = ensure_user_from_message(message)
+            reset_user_state(user)
+            action = MAIN_TEXT_ACTIONS.get('/' + message.text.split()[0].lstrip('/'))
+            route_main_action(bot, user, message.chat.id, action or '')
 
         @bot.message_handler(content_types=['text', 'photo', 'document'])
         def text_handler(message):
             user = ensure_user_from_message(message)
             if user.is_blocked:
                 return
+            text_value = (message.text or '').strip()
+            if text_value in MAIN_TEXT_ACTIONS:
+                reset_user_state(user)
+                route_main_action(bot, user, message.chat.id, MAIN_TEXT_ACTIONS[text_value])
+                return
+            if text_value in {BTN_CANCEL, 'لغو', 'انصراف', '🏠 منوی اصلی'}:
+                reset_user_state(user)
+                send_main_menu(bot, message.chat.id)
+                return
+
             state = user.state or ''
             site_now = get_site()
 
@@ -221,10 +382,8 @@ class Command(BaseCommand):
                         bot.send_message(site_now.support_chat_id, admin_text)
                     except Exception:
                         pass
-                user.state = ''
-                user.temp_data = {}
-                user.save(update_fields=['state', 'temp_data', 'updated_at'])
-                bot.send_message(message.chat.id, '✅ پیام شما ارسال شد. پشتیبانی بررسی می‌کند.', reply_markup=main_menu_keyboard())
+                reset_user_state(user)
+                bot.send_message(message.chat.id, '✅ پیام شما ارسال شد. پشتیبانی بررسی می‌کند.', reply_markup=main_reply_keyboard())
                 return
 
             if state == 'awaiting_custom_topup':
@@ -237,14 +396,12 @@ class Command(BaseCommand):
                     bot.send_message(
                         message.chat.id,
                         f'✅ لینک پرداخت ساخته شد.\nمبلغ: {toman(amount)}\nمبلغ دلاری تقریبی: {usd(payment.amount_usd)}\n\n{payment.payment_url}',
-                        reply_markup=main_menu_keyboard(),
+                        reply_markup=main_reply_keyboard(),
                         disable_web_page_preview=True,
                     )
                 except OxaPayError as exc:
-                    bot.send_message(message.chat.id, f'خطا در ساخت لینک پرداخت: {exc}', reply_markup=main_menu_keyboard())
-                user.state = ''
-                user.temp_data = {}
-                user.save(update_fields=['state', 'temp_data', 'updated_at'])
+                    bot.send_message(message.chat.id, f'خطا در ساخت لینک پرداخت: {exc}', reply_markup=main_reply_keyboard())
+                reset_user_state(user)
                 return
 
             if state == 'awaiting_card_receipt':
@@ -259,10 +416,8 @@ class Command(BaseCommand):
                         )
                     except Exception:
                         pass
-                user.state = ''
-                user.temp_data = {}
-                user.save(update_fields=['state', 'temp_data', 'updated_at'])
-                bot.send_message(message.chat.id, '✅ رسید شما ثبت شد. بعد از تایید مدیر، کیف پول شارژ می‌شود.', reply_markup=main_menu_keyboard())
+                reset_user_state(user)
+                bot.send_message(message.chat.id, '✅ رسید شما ثبت شد. بعد از تایید مدیر، کیف پول شارژ می‌شود.', reply_markup=main_reply_keyboard())
                 return
 
             send_main_menu(bot, message.chat.id)
@@ -275,21 +430,16 @@ class Command(BaseCommand):
             site_now = get_site()
 
             if data == 'cancel':
-                user.state = ''
-                user.temp_data = {}
-                user.save(update_fields=['state', 'temp_data', 'updated_at'])
-                edit_or_send(bot, call, 'به منوی اصلی برگشتید.', main_menu_keyboard())
+                reset_user_state(user)
+                edit_or_send(bot, call, 'به منوی اصلی برگشتید.')
                 return
 
             if not site_now.is_shop_active and data not in ['contact', 'tutorial']:
-                edit_or_send(bot, call, 'فروشگاه موقتاً غیرفعال است. لطفاً بعداً مراجعه کنید.', main_menu_keyboard())
+                edit_or_send(bot, call, 'فروشگاه موقتاً غیرفعال است. لطفاً بعداً مراجعه کنید.', home_inline_keyboard())
                 return
 
             if data == 'new':
-                services = Service.objects.filter(is_active=True, plans__is_active=True).distinct().order_by('sort_order', 'name')
-                rows = [[(f'🟢 {s.name}', f'svc:{s.pk}')] for s in services]
-                rows.append([('بازگشت', 'cancel')])
-                edit_or_send(bot, call, 'سرویس مورد نظر را انتخاب کنید:', inline(rows))
+                show_new_services(bot, call.message.chat.id, call=call)
                 return
 
             if data.startswith('svc:'):
@@ -332,8 +482,7 @@ class Command(BaseCommand):
                 except Exception as exc:  # noqa: BLE001
                     if order:
                         refund_order(order, f'خطا در ساخت سرویس: {exc}')
-                    bot.send_message(call.message.chat.id, f'خرید انجام نشد و اگر مبلغی کم شده باشد به کیف پول برگشت داده شد.\nخطا: {exc}')
-                send_main_menu(bot, call.message.chat.id)
+                    bot.send_message(call.message.chat.id, f'خرید انجام نشد و اگر مبلغی کم شده باشد به کیف پول برگشت داده شد.\nخطا: {exc}', reply_markup=main_reply_keyboard())
                 return
 
             if data.startswith('chargebuy:'):
@@ -344,31 +493,22 @@ class Command(BaseCommand):
                 try:
                     payment = create_oxapay_payment(user, need, pending_plan=plan, auto_purchase=True)
                     text = f'برای شارژ کیف پول و خرید خودکار این پلن، پرداخت را انجام دهید:\nمبلغ: {toman(need)}\n{payment.payment_url}'
-                    edit_or_send(bot, call, text, main_menu_keyboard())
+                    edit_or_send(bot, call, text, home_inline_keyboard())
                 except OxaPayError as exc:
-                    edit_or_send(bot, call, f'خطا در ساخت لینک پرداخت: {exc}', main_menu_keyboard())
+                    edit_or_send(bot, call, f'خطا در ساخت لینک پرداخت: {exc}', home_inline_keyboard())
                 return
 
             if data == 'wallet':
-                user.refresh_from_db()
-                rows = [
-                    [('۱۰۰ هزار', 'topup:100000'), ('۵۰۰ هزار', 'topup:500000')],
-                    [('۱ میلیون', 'topup:1000000'), ('۲ میلیون', 'topup:2000000')],
-                    [('مبلغ دلخواه', 'topup_custom')],
-                ]
-                if site_now.card_to_card_enabled:
-                    rows.append([('کارت‌به‌کارت', 'card_amount')])
-                rows.append([('بازگشت', 'cancel')])
-                edit_or_send(bot, call, f'💳 موجودی کیف پول شما: {toman(user.wallet_balance_toman)}\nمبلغ شارژ را انتخاب کنید:', inline(rows))
+                show_wallet(bot, user, call.message.chat.id, call=call)
                 return
 
             if data.startswith('topup:'):
                 amount = int(data.split(':')[1])
                 try:
                     payment = create_oxapay_payment(user, amount)
-                    edit_or_send(bot, call, f'✅ لینک پرداخت ساخته شد.\nمبلغ: {toman(amount)}\nمعادل دلاری: {usd(payment.amount_usd)}\n\n{payment.payment_url}', main_menu_keyboard())
+                    edit_or_send(bot, call, f'✅ لینک پرداخت ساخته شد.\nمبلغ: {toman(amount)}\nمعادل دلاری: {usd(payment.amount_usd)}\n\n{payment.payment_url}', home_inline_keyboard())
                 except OxaPayError as exc:
-                    edit_or_send(bot, call, f'خطا در ساخت لینک پرداخت: {exc}', main_menu_keyboard())
+                    edit_or_send(bot, call, f'خطا در ساخت لینک پرداخت: {exc}', home_inline_keyboard())
                 return
 
             if data == 'topup_custom':
@@ -380,7 +520,7 @@ class Command(BaseCommand):
 
             if data == 'card_amount':
                 if not site_now.card_to_card_enabled:
-                    edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', main_menu_keyboard())
+                    edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
                     return
                 rows = [[('۵۰۰ هزار', 'card:500000'), ('۱ میلیون', 'card:1000000')], [('۲ میلیون', 'card:2000000')], [('بازگشت', 'wallet')]]
                 edit_or_send(bot, call, 'مبلغ کارت‌به‌کارت را انتخاب کنید:', inline(rows))
@@ -389,7 +529,7 @@ class Command(BaseCommand):
             if data.startswith('card:'):
                 amount = int(data.split(':')[1])
                 if not site_now.card_to_card_enabled:
-                    edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', main_menu_keyboard())
+                    edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
                     return
                 user.state = 'awaiting_card_receipt'
                 user.temp_data = {'amount_toman': amount}
@@ -398,18 +538,7 @@ class Command(BaseCommand):
                 return
 
             if data == 'services':
-                orders = Order.objects.filter(user=user, status=Order.Status.PROVISIONED).select_related('plan', 'service').order_by('-created_at')[:10]
-                if not orders:
-                    edit_or_send(bot, call, 'هنوز سرویس فعالی ندارید.', main_menu_keyboard())
-                    return
-                rows = []
-                text = '📦 سرویس‌های شما:\n\n'
-                for o in orders:
-                    exp = fa_digits(timezone.localtime(o.expires_at).strftime('%Y-%m-%d')) if o.expires_at else 'بدون تاریخ'
-                    text += f'#{fa_digits(o.pk)} - {o.service.name} / {o.plan.name} / انقضا: {exp}\n'
-                    rows.append([(f'ارسال مجدد لینک #{o.pk}', f'resend:{o.pk}')])
-                rows.append([('بازگشت', 'cancel')])
-                edit_or_send(bot, call, text, inline(rows))
+                show_my_services(bot, user, call.message.chat.id, call=call)
                 return
 
             if data.startswith('resend:'):
@@ -418,13 +547,7 @@ class Command(BaseCommand):
                 return
 
             if data == 'renew':
-                orders = Order.objects.filter(user=user, status=Order.Status.PROVISIONED).select_related('plan', 'service').order_by('-created_at')[:10]
-                if not orders:
-                    edit_or_send(bot, call, 'برای تمدید، ابتدا باید یک سرویس فعال داشته باشید.', main_menu_keyboard())
-                    return
-                rows = [[(f'{o.service.name} / {o.plan.name} #{o.pk}', f'reneword:{o.pk}')] for o in orders]
-                rows.append([('بازگشت', 'cancel')])
-                edit_or_send(bot, call, 'کدام سرویس را تمدید می‌کنید؟', inline(rows))
+                show_renew(bot, user, call.message.chat.id, call=call)
                 return
 
             if data.startswith('reneword:'):
@@ -446,24 +569,20 @@ class Command(BaseCommand):
                     return
                 try:
                     renewed = renew_order_from_wallet(order, plan)
-                    bot.send_message(call.message.chat.id, f'✅ سرویس شما تمدید شد. تاریخ انقضای جدید: {fa_digits(timezone.localtime(renewed.expires_at).strftime("%Y-%m-%d %H:%M"))}')
+                    bot.send_message(call.message.chat.id, f'✅ سرویس شما تمدید شد. تاریخ انقضای جدید: {fa_digits(timezone.localtime(renewed.expires_at).strftime("%Y-%m-%d %H:%M"))}', reply_markup=main_reply_keyboard())
                 except Exception as exc:  # noqa: BLE001
-                    bot.send_message(call.message.chat.id, f'خطا در تمدید خودکار. لطفاً با پشتیبانی ارتباط بگیرید.\n{exc}')
-                send_main_menu(bot, call.message.chat.id)
+                    bot.send_message(call.message.chat.id, f'خطا در تمدید خودکار. لطفاً با پشتیبانی ارتباط بگیرید.\n{exc}', reply_markup=main_reply_keyboard())
                 return
 
             if data == 'tutorial':
-                edit_or_send(bot, call, site_now.tutorial_text or 'آموزش اتصال هنوز تنظیم نشده است.', main_menu_keyboard())
+                show_tutorial(bot, call.message.chat.id, call=call)
                 return
 
             if data == 'contact':
-                user.state = 'awaiting_contact'
-                user.temp_data = {}
-                user.save(update_fields=['state', 'temp_data', 'updated_at'])
-                edit_or_send(bot, call, site_now.contact_intro_text, cancel_keyboard())
+                show_contact(bot, user, call.message.chat.id, call=call)
                 return
 
-            edit_or_send(bot, call, 'گزینه نامعتبر است.', main_menu_keyboard())
+            edit_or_send(bot, call, 'گزینه نامعتبر است.', home_inline_keyboard())
 
         self.stdout.write(self.style.SUCCESS('Telegram bot is running. Press Ctrl+C to stop.'))
         bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
