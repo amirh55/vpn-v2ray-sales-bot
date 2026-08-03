@@ -648,5 +648,25 @@ class Command(BaseCommand):
 
             edit_or_send(bot, call, 'گزینه نامعتبر است.', home_inline_keyboard())
 
+        # Telegram refuses getUpdates with HTTP 409 while a webhook is set, and
+        # a webhook left over from an earlier deployment of the same token
+        # would otherwise keep the bot dead forever.
+        self.drop_webhook(bot)
+
         self.stdout.write(self.style.SUCCESS('Telegram bot is running. Press Ctrl+C to stop.'))
-        bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+        while True:
+            try:
+                bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+                return
+            except Exception as exc:
+                self.stdout.write(self.style.ERROR(
+                    f'ارتباط ربات با تلگرام قطع شد: {exc} — ۱۵ ثانیه دیگر دوباره تلاش می‌کنم.'
+                ))
+                time.sleep(15)
+                self.drop_webhook(bot)
+
+    def drop_webhook(self, bot: TeleBot) -> None:
+        try:
+            bot.remove_webhook()
+        except Exception as exc:
+            self.stdout.write(self.style.WARNING(f'حذف webhook قبلی ناموفق بود: {exc}'))
