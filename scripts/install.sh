@@ -56,11 +56,10 @@ else
 fi
 green "پیش‌نیازها نصب شد."
 
-# Django 5.1 supports 3.10 to 3.13. A server whose default python3 is newer
-# needs a supported interpreter installed alongside it, otherwise the app runs
-# on a version its own framework does not support.
+# requirements.txt carries two dependency sets and pip picks by version, so
+# anything in this range installs a stack that supports it.
 PY_MIN=10
-PY_MAX=13
+PY_MAX=14
 
 py_supported() {
   "$1" -c "import sys
@@ -109,16 +108,22 @@ else
 fi
 
 step "ساخت محیط پایتون و نصب کتابخانه‌ها"
-# A venv built on an unsupported interpreter, or by a failed earlier run, is
-# rebuilt rather than reused; pip would otherwise keep failing the same way.
-if [ -x "$APP_DIR/.venv/bin/python" ] && ! py_supported "$APP_DIR/.venv/bin/python"; then
-  yellow "محیط مجازی قبلی روی پایتون ناسازگار ساخته شده بود؛ بازسازی می‌شود."
-  rm -rf "$APP_DIR/.venv"
+# A venv left behind by a failed run, or built on a Python outside the
+# supported range, is rebuilt rather than reused: pip would otherwise keep
+# failing in exactly the same way.
+if [ -x "$APP_DIR/.venv/bin/python" ]; then
+  if ! py_supported "$APP_DIR/.venv/bin/python" \
+     || ! "$APP_DIR/.venv/bin/python" -c 'import django' >/dev/null 2>&1; then
+    yellow "محیط مجازی قبلی ناقص یا ناسازگار بود؛ بازسازی می‌شود."
+    rm -rf "$APP_DIR/.venv"
+  fi
 fi
 [ -x "$APP_DIR/.venv/bin/python" ] || "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --upgrade pip -q
-"$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
-green "کتابخانه‌ها نصب شد."
+if ! "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q; then
+  die "نصب کتابخانه‌ها ناموفق بود. متن خطای بالا را بررسی کنید."
+fi
+green "کتابخانه‌ها نصب شد. (Django $("$APP_DIR/.venv/bin/python" -c 'import django; print(django.get_version())'))"
 
 step "ساخت فایل تنظیمات"
 mkdir -p "$CONF_DIR" "$RUNTIME_DIR"
