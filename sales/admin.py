@@ -76,10 +76,12 @@ class SiteSettingAdmin(ModelAdmin):
         ('قیمت و درگاه', {'fields': ('dollar_rate_toman', 'oxapay_merchant_api_key', 'oxapay_sandbox', 'invoice_lifetime_minutes', 'oxapay_fee_paid_by_payer')}),
         ('کارت‌به‌کارت', {
             'fields': (
-                'card_to_card_enabled', 'card_to_card_text', 'card_invoice_minutes',
-                'card_auto_confirm_enabled', 'sms_webhook_secret', 'sms_allowed_senders',
-                'sms_webhook_url',
+                'card_to_card_enabled', 'card_number', 'card_holder_name', 'card_bank_name',
+                'card_to_card_text', 'card_invoice_minutes',
             ),
+        }),
+        ('تایید خودکار با پیامک بانکی', {
+            'fields': ('card_auto_confirm_enabled', 'sms_webhook_secret', 'sms_allowed_senders', 'sms_webhook_url'),
         }),
         ('متن‌ها', {'fields': ('tutorial_text', 'contact_intro_text', 'after_purchase_text')}),
     )
@@ -113,14 +115,7 @@ class XUIPanelAdmin(ModelAdmin):
 class PlanInline(TabularInline):
     model = Plan
     extra = 1
-    fields = ('name', 'price_usd', 'price_toman_preview', 'duration_days', 'traffic_gb', 'user_limit', 'sort_order', 'is_active')
-    readonly_fields = ('price_toman_preview',)
-
-    @admin.display(description='قیمت تومان')
-    def price_toman_preview(self, obj):
-        if not obj or obj.pk is None:
-            return 'بعد از ذخیره محاسبه می‌شود'
-        return f'{obj.price_toman():,} تومان'
+    fields = ('name', 'price_toman', 'price_usd', 'duration_days', 'traffic_gb', 'user_limit', 'sort_order', 'is_active')
 
 
 @admin.register(Service)
@@ -137,14 +132,17 @@ class ServiceAdmin(ModelAdmin):
 
 @admin.register(Plan)
 class PlanAdmin(ModelAdmin):
-    list_display = ('name', 'service', 'price_usd', 'price_toman_col', 'duration_days', 'traffic_gb', 'user_limit', 'is_active')
+    list_display = ('name', 'service', 'price_toman', 'price_usd', 'crypto_saving', 'duration_days', 'traffic_gb', 'user_limit', 'is_active')
     list_filter = ('is_active', 'service')
     search_fields = ('name', 'description', 'service__name')
-    list_editable = ('price_usd', 'duration_days', 'traffic_gb', 'user_limit', 'is_active')
+    list_editable = ('price_toman', 'price_usd', 'duration_days', 'traffic_gb', 'user_limit', 'is_active')
 
-    @admin.display(description='قیمت تومان')
-    def price_toman_col(self, obj):
-        return f'{obj.price_toman():,}'
+    @admin.display(description='تخفیف کریپتو')
+    def crypto_saving(self, obj):
+        percent = obj.crypto_saving_percent()
+        if percent <= 0:
+            return 'ندارد'
+        return f'{percent}٪ ({obj.crypto_saving_toman():,} تومان)'
 
 
 @admin.register(TelegramUser)

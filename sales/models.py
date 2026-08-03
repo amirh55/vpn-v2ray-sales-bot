@@ -20,14 +20,30 @@ class SiteSetting(TimeStampedModel):
     support_chat_id = models.CharField('چت آیدی پشتیبانی', max_length=64, blank=True)
     admin_chat_id = models.CharField('چت آیدی مدیر برای اعلان‌ها', max_length=64, blank=True)
 
-    dollar_rate_toman = models.DecimalField('قیمت هر دلار به تومان', max_digits=18, decimal_places=0, default=Decimal('60000'))
+    # Plans carry their own toman and dollar prices. This rate is only used to
+    # convert a wallet top-up into dollars for the crypto gateway, and to show
+    # customers roughly how much the crypto price saves them.
+    dollar_rate_toman = models.DecimalField(
+        'نرخ دلار به تومان، برای شارژ کیف پول و نمایش تخفیف',
+        max_digits=18,
+        decimal_places=0,
+        default=Decimal('60000'),
+    )
     oxapay_merchant_api_key = models.CharField('Merchant API Key درگاه OxaPay', max_length=255, blank=True)
     oxapay_sandbox = models.BooleanField('حالت تست OxaPay', default=True)
     invoice_lifetime_minutes = models.PositiveIntegerField('مهلت پرداخت فاکتور OxaPay / دقیقه', default=60)
     oxapay_fee_paid_by_payer = models.BooleanField('کارمزد OxaPay با پرداخت‌کننده باشد', default=True)
 
     card_to_card_enabled = models.BooleanField('پرداخت کارت‌به‌کارت فعال باشد', default=False)
-    card_to_card_text = models.TextField('متن کارت‌به‌کارت، فقط وقتی فعال باشد به کاربر نشان داده می‌شود', blank=True)
+    card_number = models.CharField(
+        'شماره کارت',
+        max_length=32,
+        blank=True,
+        help_text='۱۶ رقم، با یا بدون فاصله. به کاربر به صورت قابل کپی نمایش داده می‌شود.',
+    )
+    card_holder_name = models.CharField('نام صاحب کارت', max_length=120, blank=True)
+    card_bank_name = models.CharField('نام بانک', max_length=120, blank=True)
+    card_to_card_text = models.TextField('توضیح اضافه کارت‌به‌کارت، اختیاری', blank=True)
     card_invoice_minutes = models.PositiveIntegerField('مهلت پرداخت کارت‌به‌کارت / دقیقه', default=30)
     card_auto_confirm_enabled = models.BooleanField('تایید خودکار کارت‌به‌کارت با پیامک بانکی', default=False)
     sms_webhook_secret = models.CharField(
@@ -123,7 +139,10 @@ class Plan(TimeStampedModel):
     service = models.ForeignKey(Service, verbose_name='سرویس', on_delete=models.CASCADE, related_name='plans')
     name = models.CharField('نام اشتراک/پلن', max_length=120)
     description = models.TextField('توضیحات پلن', blank=True)
-    price_usd = models.DecimalField('قیمت دلاری', max_digits=10, decimal_places=2)
+    # Two independent prices. The dollar price is set lower on purpose to steer
+    # customers towards crypto, so it is never derived from the toman price.
+    price_toman = models.DecimalField('قیمت تومانی، برای کارت‌به‌کارت و کیف پول', max_digits=18, decimal_places=0, default=Decimal('0'))
+    price_usd = models.DecimalField('قیمت دلاری، برای پرداخت کریپتو', max_digits=10, decimal_places=2)
     duration_days = models.PositiveIntegerField('مدت زمان / روز')
     traffic_gb = models.DecimalField('حجم / گیگابایت؛ ۰ یعنی نامحدود', max_digits=12, decimal_places=2, default=Decimal('0'))
     user_limit = models.PositiveIntegerField('تعداد کاربر / IP Limit', default=1)
@@ -138,9 +157,20 @@ class Plan(TimeStampedModel):
     def __str__(self) -> str:
         return f'{self.service.name} - {self.name}'
 
-    def price_toman(self) -> int:
+    def crypto_equivalent_toman(self) -> int:
+        """Roughly what the dollar price costs in toman, for showing the saving."""
         settings = SiteSetting.get_solo()
         return int(self.price_usd * settings.dollar_rate_toman)
+
+    def crypto_saving_toman(self) -> int:
+        """How much cheaper paying in crypto is. Zero when it is not cheaper."""
+        return max(0, int(self.price_toman) - self.crypto_equivalent_toman())
+
+    def crypto_saving_percent(self) -> int:
+        base = int(self.price_toman)
+        if base <= 0:
+            return 0
+        return int(round(self.crypto_saving_toman() * 100 / base))
 
 
 class TelegramUser(TimeStampedModel):
@@ -301,6 +331,24 @@ class CardPaymentRequest(TimeStampedModel):
     receipt_text = models.TextField('متن/شماره پیگیری رسید', blank=True)
     receipt_file_id = models.CharField('شناسه تصویر رسید در تلگرام', max_length=255, blank=True)
     auto_approved = models.BooleanField('تایید خودکار با پیامک', default=False)
+    # Set when the customer is buying a plan rather than topping up, so the
+    # service is delivered as soon as the transfer is recognised.
+    pending_plan = models.ForeignKey(
+        'Plan',
+        verbose_name='پلن در انتظار خرید',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+    )
+    auto_purchase_after_paid = models.BooleanField('بعد از تایید، سرویس خودکار ساخته شود', default=False)
+    created_order = models.ForeignKey(
+        'Order',
+        verbose_name='سفارش ساخته‌شده',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='card_requests',
+    )
     # The webhook settles payments in the web process, which has no bot loop.
     # This marks whether the customer has already been told.
     notified_at = models.DateTimeField('زمان اطلاع‌رسانی به کاربر', null=True, blank=True)

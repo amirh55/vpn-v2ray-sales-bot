@@ -136,9 +136,29 @@ def plan_text(plan: Plan) -> str:
         f'سرویس: {plan.service.name}\n'
         f'مدت: {days_text(plan.duration_days)}\n'
         f'حجم: {traffic_text(plan.traffic_gb)}\n'
-        f'تعداد کاربر: {fa_digits(plan.user_limit)}\n'
-        f'قیمت: {usd(plan.price_usd)} / {toman(plan.price_toman())}'
+        f'تعداد کاربر: {fa_digits(plan.user_limit)}\n\n'
+        f'{price_block(plan)}'
     )
+
+
+def price_block(plan: Plan) -> str:
+    """Both prices side by side, with the crypto saving spelled out.
+
+    The dollar price is set independently and lower, so customers are told
+    plainly what paying in crypto saves them.
+    """
+    lines = [
+        f'💳 پرداخت ریالی: {toman(plan.price_toman)}',
+        f'🪙 پرداخت کریپتو: {usd(plan.price_usd)}',
+    ]
+    percent = plan.crypto_saving_percent()
+    if percent > 0:
+        lines.append('')
+        lines.append(
+            f'🎁 با پرداخت کریپتو حدود <b>{fa_digits(percent)}٪</b> ارزان‌تر می‌خرید '
+            f'(حدود {toman(plan.crypto_saving_toman())} کمتر).'
+        )
+    return '\n'.join(lines)
 
 
 def send_main_menu(bot: TeleBot, chat_id: int):
@@ -171,9 +191,17 @@ def send_or_edit(bot: TeleBot, chat_id: int, text: str, kb=None, call=None):
         bot.send_message(chat_id, text, reply_markup=kb, disable_web_page_preview=True)
 
 
-def create_oxapay_payment(user: TelegramUser, amount_toman: int, pending_plan: Plan | None = None, auto_purchase: bool = False) -> Payment:
+def create_oxapay_payment(
+    user: TelegramUser,
+    amount_toman: int,
+    pending_plan: Plan | None = None,
+    auto_purchase: bool = False,
+    amount_usd: Decimal | None = None,
+) -> Payment:
     site = get_site()
-    amount_usd = toman_to_usd(Decimal(amount_toman), site.dollar_rate_toman)
+    # Plans carry their own dollar price; only wallet top-ups need converting.
+    if amount_usd is None:
+        amount_usd = toman_to_usd(Decimal(amount_toman), site.dollar_rate_toman)
     payment = Payment.objects.create(
         user=user,
         provider=Payment.Provider.OXAPAY,
@@ -277,12 +305,29 @@ def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
     send_or_edit(bot, chat_id, text, inline(rows), call=call)
 
 
+def card_details_text(site: SiteSetting) -> str:
+    """Card number in a code block so Telegram makes it tap-to-copy."""
+    lines = []
+    if site.card_number:
+        lines.append(f'💳 شماره کارت:\n<code>{site.card_number}</code>')
+    if site.card_holder_name:
+        lines.append(f'👤 به نام: {site.card_holder_name}')
+    if site.card_bank_name:
+        lines.append(f'🏦 بانک: {site.card_bank_name}')
+    if site.card_to_card_text:
+        lines.append(site.card_to_card_text)
+    return '\n'.join(lines) if lines else 'اطلاعات کارت هنوز در پنل ثبت نشده است.'
+
+
 def card_invoice_text(site: SiteSetting, req: CardPaymentRequest) -> str:
     """Explain the exact figure to transfer and why it must be exact."""
     minutes = int(site.card_invoice_minutes or 30)
+    header = ''
+    if req.pending_plan_id:
+        header = f'🛒 خرید: <b>{req.pending_plan.name}</b>\n\n'
     return (
-        f'{site.card_to_card_text}\n\n'
-        f'💰 مبلغ دقیق واریز: <b>{toman(req.amount_toman)}</b>\n\n'
+        f'{header}{card_details_text(site)}\n\n'
+        f'💰 مبلغ دقیق واریز:\n<code>{int(req.amount_toman)}</code> تومان\n\n'
         '⚠️ حتماً <b>دقیقاً همین مبلغ</b> را واریز کنید. '
         'رقم‌های آخر مخصوص سفارش شماست و با آن پرداختتان خودکار شناسایی می‌شود.\n'
         f'⏱ مهلت پرداخت: {fa_digits(minutes)} دقیقه\n\n'
@@ -377,19 +422,36 @@ def notify_auto_approved_cards(bot: TeleBot):
     """
     while True:
         try:
+            # Manual approvals from the panel need telling too, so this is not
+            # limited to the automatic ones.
             pending = CardPaymentRequest.objects.filter(
                 status=CardPaymentRequest.Status.APPROVED,
-                auto_approved=True,
                 notified_at__isnull=True,
-            ).select_related('user')[:20]
+            ).select_related('user', 'created_order', 'pending_plan')[:20]
             for req in pending:
                 try:
-                    bot.send_message(
-                        req.user.chat_id,
-                        '✅ واریز شما شناسایی شد.\n'
-                        f'کیف پول شما به مبلغ {toman(req.amount_toman)} شارژ شد.',
-                        reply_markup=main_reply_keyboard(),
-                    )
+                    if req.created_order_id:
+                        bot.send_message(
+                            req.user.chat_id,
+                            '✅ واریز شما تایید شد و سرویس ساخته شد.',
+                            reply_markup=main_reply_keyboard(),
+                        )
+                        send_delivery(bot, req.user.chat_id, req.created_order)
+                    elif req.auto_purchase_after_paid and req.pending_plan_id:
+                        bot.send_message(
+                            req.user.chat_id,
+                            '✅ واریز شما تایید و کیف پولتان شارژ شد، اما ساخت خودکار سرویس '
+                            'انجام نشد. پشتیبانی پیگیری می‌کند و می‌توانید از «سرویس‌های من» '
+                            'دوباره اقدام کنید.',
+                            reply_markup=main_reply_keyboard(),
+                        )
+                    else:
+                        bot.send_message(
+                            req.user.chat_id,
+                            '✅ واریز شما شناسایی شد.\n'
+                            f'کیف پول شما به مبلغ {toman(req.amount_toman)} شارژ شد.',
+                            reply_markup=main_reply_keyboard(),
+                        )
                 except Exception:
                     pass
                 req.notified_at = timezone.now()
@@ -677,21 +739,63 @@ class Command(BaseCommand):
                 service = Service.objects.get(pk=service_id, is_active=True)
                 plans = service.plans.filter(is_active=True).order_by('sort_order', 'price_usd')
                 text = f'📡 <b>{service.name}</b>\n{service.description or ""}\n\nپلن مورد نظر را انتخاب کنید:'
-                rows = [[(f'{p.name} - {toman(p.price_toman())}', f'plan:{p.pk}')] for p in plans]
+                rows = [[(f'{p.name} - {toman(p.price_toman)}', f'plan:{p.pk}')] for p in plans]
                 rows.append([('بازگشت', 'new')])
                 edit_or_send(bot, call, text, inline(rows))
                 return
 
             if data.startswith('plan:'):
                 plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
-                text = plan_text(plan)
-                rows = [[('✅ خرید این پلن', f'buy:{plan.pk}')], [('بازگشت به سرویس‌ها', 'new')]]
-                edit_or_send(bot, call, text, inline(rows))
+                user.refresh_from_db()
+                rows = []
+                if user.wallet_balance_toman >= Decimal(plan.price_toman):
+                    rows.append([('👛 پرداخت از کیف پول', f'buy:{plan.pk}')])
+                rows.append([('🪙 پرداخت با کریپتو (ارزان‌تر)', f'cryptobuy:{plan.pk}')])
+                if site_now.card_to_card_enabled:
+                    rows.append([('💳 کارت‌به‌کارت', f'cardbuy:{plan.pk}')])
+                rows.append([('بازگشت به سرویس‌ها', 'new')])
+                edit_or_send(bot, call, plan_text(plan) + '\n\nروش پرداخت را انتخاب کنید:', inline(rows))
+                return
+
+            if data.startswith('cryptobuy:'):
+                plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
+                try:
+                    # The plan's own dollar price is billed, with no conversion,
+                    # while the wallet is credited the toman price so the
+                    # automatic purchase can go through.
+                    payment = create_oxapay_payment(
+                        user,
+                        int(plan.price_toman),
+                        amount_usd=Decimal(plan.price_usd),
+                        pending_plan=plan,
+                        auto_purchase=True,
+                    )
+                    text = (
+                        f'🪙 پرداخت کریپتو برای <b>{plan.name}</b>\n\n'
+                        f'مبلغ: {usd(plan.price_usd)}\n'
+                        'بعد از پرداخت، سرویس به صورت خودکار ساخته و ارسال می‌شود.\n\n'
+                        f'{payment.payment_url}'
+                    )
+                    edit_or_send(bot, call, text, home_inline_keyboard())
+                except OxaPayError as exc:
+                    edit_or_send(bot, call, f'خطا در ساخت لینک پرداخت: {exc}', home_inline_keyboard())
+                return
+
+            if data.startswith('cardbuy:'):
+                plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
+                if not site_now.card_to_card_enabled:
+                    edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
+                    return
+                req = create_card_request(user, int(plan.price_toman), plan=plan)
+                user.state = 'awaiting_card_receipt'
+                user.temp_data = {'card_request_id': req.pk}
+                user.save(update_fields=['state', 'temp_data', 'updated_at'])
+                edit_or_send(bot, call, card_invoice_text(site_now, req), cancel_keyboard())
                 return
 
             if data.startswith('buy:'):
                 plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
-                price = Decimal(plan.price_toman())
+                price = Decimal(plan.price_toman)
                 user.refresh_from_db()
                 if user.wallet_balance_toman < price:
                     need = int(price - user.wallet_balance_toman)
@@ -717,7 +821,7 @@ class Command(BaseCommand):
 
             if data.startswith('chargebuy:'):
                 plan = Plan.objects.get(pk=int(data.split(':')[1]), is_active=True)
-                price = Decimal(plan.price_toman())
+                price = Decimal(plan.price_toman)
                 user.refresh_from_db()
                 need = int(max(Decimal('0'), price - user.wallet_balance_toman))
                 try:
@@ -797,7 +901,7 @@ class Command(BaseCommand):
             if data.startswith('reneword:'):
                 order = Order.objects.select_related('service').get(pk=int(data.split(':')[1]), user=user)
                 plans = order.service.plans.filter(is_active=True)
-                rows = [[(f'{p.name} - {toman(p.price_toman())}', f'renewpl:{order.pk}:{p.pk}')] for p in plans]
+                rows = [[(f'{p.name} - {toman(p.price_toman)}', f'renewpl:{order.pk}:{p.pk}')] for p in plans]
                 rows.append([('بازگشت', 'renew')])
                 edit_or_send(bot, call, 'پلن تمدید را انتخاب کنید:', inline(rows))
                 return
@@ -806,7 +910,7 @@ class Command(BaseCommand):
                 _, order_id, plan_id = data.split(':')
                 order = Order.objects.get(pk=int(order_id), user=user)
                 plan = Plan.objects.get(pk=int(plan_id), service=order.service, is_active=True)
-                price = Decimal(plan.price_toman())
+                price = Decimal(plan.price_toman)
                 user.refresh_from_db()
                 if user.wallet_balance_toman < price:
                     edit_or_send(bot, call, f'موجودی کافی نیست. قیمت تمدید: {toman(price)}\nابتدا کیف پول را شارژ کنید.', inline([[('شارژ کیف پول', 'wallet')], [('بازگشت', 'renew')]]))

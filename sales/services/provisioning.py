@@ -78,7 +78,7 @@ def build_client_payload(order: Order, client_uuid: str, client_email: str, expi
 
 @transaction.atomic
 def create_order_from_wallet(user: TelegramUser, plan: Plan) -> Order:
-    price = Decimal(plan.price_toman())
+    price = Decimal(plan.price_toman)
     user = TelegramUser.objects.select_for_update().get(pk=user.pk)
     if user.wallet_balance_toman < price:
         raise ValueError('موجودی کیف پول کافی نیست.')
@@ -140,7 +140,7 @@ def renew_order_from_wallet(order: Order, plan: Plan) -> Order:
     with transaction.atomic():
         order = Order.objects.select_for_update().select_related('user', 'service', 'service__panel').get(pk=order.pk)
         user = TelegramUser.objects.select_for_update().get(pk=order.user.pk)
-        price = Decimal(plan.price_toman())
+        price = Decimal(plan.price_toman)
         if user.wallet_balance_toman < price:
             raise ValueError('موجودی کیف پول کافی نیست.')
         user.wallet_balance_toman -= price

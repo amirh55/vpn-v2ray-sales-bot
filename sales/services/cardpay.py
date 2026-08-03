@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from sales.models import BankSms, CardPaymentRequest, SiteSetting, TelegramUser, WalletTransaction
+from sales.services.provisioning import create_order_from_wallet, provision_order
 from sales.services.banksms import (
     extract_amounts_toman,
     find_matching_request,
@@ -26,8 +27,12 @@ def get_or_create_sms_secret() -> str:
     return site.sms_webhook_secret
 
 
-def create_request(user: TelegramUser, base_amount_toman: int) -> CardPaymentRequest:
-    """Open an invoice for a distinctive figure, valid for a limited window."""
+def create_request(user: TelegramUser, base_amount_toman: int, plan=None) -> CardPaymentRequest:
+    """Open an invoice for a distinctive figure, valid for a limited window.
+
+    Passing a plan turns this into a purchase: the service is delivered as soon
+    as the transfer is confirmed, instead of only topping up the wallet.
+    """
     site = SiteSetting.get_solo()
     minutes = int(site.card_invoice_minutes or 30)
     amount = generate_unique_amount(int(base_amount_toman))
@@ -36,6 +41,8 @@ def create_request(user: TelegramUser, base_amount_toman: int) -> CardPaymentReq
         base_amount_toman=Decimal(int(base_amount_toman)),
         amount_toman=Decimal(amount),
         expires_at=timezone.now() + timedelta(minutes=minutes),
+        pending_plan=plan,
+        auto_purchase_after_paid=bool(plan),
     )
 
 
@@ -67,6 +74,21 @@ def approve_request(request: CardPaymentRequest, *, auto: bool, note: str = '') 
         if note:
             locked.admin_note = (locked.admin_note + '\n' + note).strip()
         locked.save(update_fields=['status', 'auto_approved', 'admin_note', 'updated_at'])
+
+    # Provisioning talks to the panel over the network, so it stays outside the
+    # transaction. A failure here leaves the money in the wallet, where the
+    # customer can spend it, rather than rolling back a confirmed payment.
+    if locked.auto_purchase_after_paid and locked.pending_plan_id and not locked.created_order_id:
+        try:
+            order = create_order_from_wallet(locked.user, locked.pending_plan)
+            order = provision_order(order)
+            locked.created_order = order
+            locked.save(update_fields=['created_order', 'updated_at'])
+        except Exception as exc:  # noqa: BLE001
+            locked.admin_note = (
+                locked.admin_note + f'\nساخت خودکار سرویس ناموفق بود: {exc}'
+            ).strip()
+            locked.save(update_fields=['admin_note', 'updated_at'])
 
     request.refresh_from_db()
     return True
