@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import sys
 import threading
 import time
 import uuid
 from decimal import Decimal
 
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 from telebot import TeleBot, types
@@ -57,7 +58,7 @@ def inline(rows: list[list[tuple[str, str]]]) -> types.InlineKeyboardMarkup:
     return kb
 
 
-def safe_answer_callback(bot: telebot.TeleBot, call, text: str | None = None) -> None:
+def safe_answer_callback(bot: TeleBot, call, text: str | None = None) -> None:
     """Answer callback query without killing polling on expired Telegram queries."""
     try:
         bot.answer_callback_query(call.id, text=text)
@@ -327,11 +328,64 @@ class Command(BaseCommand):
     help = 'Run Telegram VPN sales bot with polling.'
 
     def handle(self, *args, **options):
-        site = get_site()
-        if not site.telegram_bot_token:
-            raise CommandError('توکن ربات تلگرام را در /admin/ بخش تنظیمات اصلی ثبت کنید.')
+        # سرویس systemd معمولا LANG ندارد و خروجی فارسی روی ASCII خطا می‌دهد.
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError):
+            pass
+        return self.run_bot(*args, **options)
 
-        bot = TeleBot(site.telegram_bot_token, parse_mode='HTML')
+    def wait_for_token(self) -> SiteSetting:
+        """Block until the operator saves a bot token in the panel.
+
+        The service usually starts right after install, before the token has
+        been entered. Exiting here would make systemd give up after a few
+        rapid restarts, so the bot would stay dead even once the token is
+        saved. Waiting instead means the bot comes to life on its own.
+        """
+        warned = False
+        while True:
+            site = get_site()
+            if site.telegram_bot_token:
+                return site
+            if not warned:
+                self.stdout.write(self.style.WARNING(
+                    'توکن ربات تلگرام هنوز ثبت نشده است. '
+                    'وارد پنل شوید و در «تنظیمات اصلی ربات» آن را ذخیره کنید. '
+                    'آدرس پنل را با دستور «vpnshop info» ببینید. '
+                    'ربات به محض ثبت توکن خودکار شروع می‌کند.'
+                ))
+                warned = True
+            time.sleep(10)
+
+    def verify_token(self, token: str) -> str:
+        """Reject an invalid token with a readable message instead of a traceback.
+
+        A mistyped token is a common setup mistake. Waiting here lets the
+        operator paste the correct one in the panel without touching the server.
+        """
+        warned = False
+        while True:
+            try:
+                TeleBot(token).get_me()
+                return token
+            except Exception as exc:
+                if not warned:
+                    self.stdout.write(self.style.ERROR(
+                        f'توکن ربات تلگرام معتبر نیست یا سرور به تلگرام دسترسی ندارد: {exc} '
+                        'توکن را در پنل، بخش «تنظیمات اصلی ربات» بررسی و اصلاح کنید. '
+                        'ربات به محض درست شدن توکن خودکار شروع می‌کند.'
+                    ))
+                    warned = True
+                time.sleep(15)
+                token = get_site().telegram_bot_token or token
+
+    def run_bot(self, *args, **options):
+        site = self.wait_for_token()
+        token = self.verify_token(site.telegram_bot_token)
+
+        bot = TeleBot(token, parse_mode='HTML')
         try:
             bot.set_my_commands([
                 types.BotCommand('start', 'شروع و نمایش منو'),

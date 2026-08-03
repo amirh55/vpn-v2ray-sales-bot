@@ -147,11 +147,14 @@ cat > "/etc/systemd/system/${WEB_SERVICE}.service" <<EOF
 [Unit]
 Description=VPN Shop Web Panel
 After=network.target
+# بدون این، systemd بعد از چند کرش پشت‌سرهم برای همیشه تسلیم می‌شود
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=$APP_DIR
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
 Environment=VPNSHOP_RUNTIME_DIR=$RUNTIME_DIR
 ExecStart=$APP_DIR/.venv/bin/gunicorn vpnshop.wsgi:application --bind $BIND_HOST:$PORT --workers 2 --timeout 120
 Restart=always
@@ -165,11 +168,13 @@ cat > "/etc/systemd/system/${BOT_SERVICE}.service" <<EOF
 [Unit]
 Description=VPN Shop Telegram Bot
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=$APP_DIR
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
 Environment=VPNSHOP_RUNTIME_DIR=$RUNTIME_DIR
 ExecStart=$APP_DIR/.venv/bin/python manage.py bot
 Restart=always

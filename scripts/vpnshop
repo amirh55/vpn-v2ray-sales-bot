@@ -79,6 +79,8 @@ cmd_status() {
 
 cmd_start() {
   need_root
+  # اگر سرویس به سقف تلاش مجدد خورده باشد، بدون این با restart بالا نمی‌آید
+  systemctl reset-failed "$WEB_SERVICE" "$BOT_SERVICE" 2>/dev/null || true
   systemctl start "$WEB_SERVICE" "$BOT_SERVICE"
   green "سرویس‌ها اجرا شدند."
 }
@@ -91,6 +93,7 @@ cmd_stop() {
 
 cmd_restart() {
   need_root
+  systemctl reset-failed "$WEB_SERVICE" "$BOT_SERVICE" 2>/dev/null || true
   systemctl restart "$WEB_SERVICE" "$BOT_SERVICE"
   green "سرویس‌ها ری‌استارت شدند."
 }
@@ -108,12 +111,10 @@ cmd_update() {
   need_root
   check_install
   yellow "در حال دریافت آخرین نسخه..."
-  (cd "$APP_DIR" && git pull --ff-only)
-  (cd "$APP_DIR" && .venv/bin/pip install -r requirements.txt -q)
-  manage migrate --noinput
-  manage collectstatic --noinput
-  systemctl restart "$WEB_SERVICE" "$BOT_SERVICE"
-  green "به‌روزرسانی انجام شد."
+  (cd "$APP_DIR" && git fetch --all -q && git reset --hard -q "origin/${BRANCH:-main}")
+  # اسکریپت نصب را دوباره اجرا می‌کنیم تا سرویس‌های systemd و خود دستور vpnshop
+  # هم با نسخه جدید هماهنگ شوند. داده‌ها و تنظیمات دست‌نخورده می‌مانند.
+  APP_DIR="$APP_DIR" RUNTIME_DIR="$RUNTIME_DIR" bash "$APP_DIR/scripts/install.sh"
 }
 
 cmd_newpath() {
