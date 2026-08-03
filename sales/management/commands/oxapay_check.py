@@ -126,6 +126,51 @@ class Command(BaseCommand):
 
         self.stdout.write('')
         self.stdout.write(self.style.ERROR('  ❌ کلید روی هیچ‌کدام از دو API کار نکرد.'))
+
+        # Identify what the key actually is, instead of guessing. Each endpoint
+        # accepts only its own key type, so a success elsewhere is proof.
+        self.stdout.write('')
+        self.stdout.write('  [۳] تشخیص نوع کلید')
+        # Only the General endpoint is probed. It is a GET and therefore safe.
+        # The payout endpoint validates the body before the key, so proving a
+        # key is a payout key would mean sending a well-formed payout — which
+        # would move real funds if the key turned out to be valid.
+        is_general = None
+        try:
+            with httpx.Client(timeout=20) as client:
+                probe = client.get(
+                    'https://api.oxapay.com/v1/general/account/balance',
+                    headers={'general_api_key': key},
+                )
+            probe_data = probe.json()
+            probe_status = probe_data.get('status') if isinstance(probe_data, dict) else None
+            is_general = not (
+                probe.status_code in (401, 403)
+                or (probe_status and int(probe_status) in (401, 403))
+            )
+        except Exception:  # noqa: BLE001
+            is_general = None
+
+        if is_general:
+            self.stdout.write(self.style.WARNING('      این کلید یک «General API Key» است، نه Merchant API Key.'))
+            self.stdout.write('      General فقط برای swap و تبدیل ارز است و فاکتور نمی‌سازد.')
+            self.stdout.write('      در پنل OxaPay به صفحه Merchant Service بروید و از آنجا کلید بسازید.')
+        elif is_general is False:
+            self.stdout.write('      این کلید، General API Key هم نیست.')
+            self.stdout.write('      یعنی یا کلید ناقص کپی شده، یا مرچنت شما هنوز فعال نیست،')
+            self.stdout.write('      یا محدودیت IP دارید و IP این سرور مجاز نیست.')
+            self.stdout.write('      (نوع Payout به‌عمد تست نمی‌شود چون تستش یعنی اجرای یک واریز واقعی.)')
+        else:
+            self.stdout.write('      تشخیص نوع کلید ممکن نشد؛ ارتباط با OxaPay برقرار نشد.')
+
+        try:
+            with httpx.Client(timeout=10) as client:
+                server_ip = client.get('https://api.ipify.org').text.strip()
+            self.stdout.write('')
+            self.stdout.write(f'      IP خروجی این سرور: {server_ip}')
+            self.stdout.write('      اگر در OxaPay بخش Allowed IP را پر کرده‌اید، همین IP را اضافه کنید.')
+        except Exception:  # noqa: BLE001
+            pass
         self.stdout.write('')
         self.stdout.write('  رایج‌ترین علت: نوع کلید اشتباه است.')
         self.stdout.write('  - Merchant API Key: برای ساخت فاکتور و دریافت پرداخت. همین لازم است.')
