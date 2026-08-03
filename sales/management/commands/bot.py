@@ -25,6 +25,7 @@ from sales.models import (
     WalletTransaction,
 )
 from sales.services.cardpay import create_request as create_card_request
+from sales.services.delivery import order_delivery_text
 from sales.services.linking import LinkingError, link_config, refresh_usage, usage_text
 from sales.services.formatting import days_text, fa_digits, parse_toman, toman, traffic_text, usd
 from sales.services.oxapay import OxaPayError, create_invoice, toman_to_usd
@@ -239,16 +240,12 @@ def refund_order(order: Order, reason: str):
 
 
 def send_delivery(bot: TeleBot, chat_id: int, order: Order):
-    text = f'✅ <b>اشتراک شما آماده است.</b>\n\n{plan_text(order.plan)}\n'
-    if order.expires_at:
-        text += f'\nتاریخ انقضا: {fa_digits(timezone.localtime(order.expires_at).strftime("%Y-%m-%d %H:%M"))}\n'
-    if order.config_link:
-        text += f'\n🔗 <b>لینک کانفیگ:</b>\n<code>{order.config_link}</code>\n'
-    if order.subscription_link:
-        text += f'\n🔄 <b>لینک Subscription:</b>\n<code>{order.subscription_link}</code>\n'
-    if not order.config_link and not order.subscription_link:
-        text += '\n⚠️ لینک کانفیگ/سابسکریپشن ساخته نشد. قالب لینک را در پنل مدیریت سرویس تنظیم کنید.'
-    bot.send_message(chat_id, text, reply_markup=main_reply_keyboard(), disable_web_page_preview=True)
+    bot.send_message(
+        chat_id,
+        order_delivery_text(order),
+        reply_markup=main_reply_keyboard(),
+        disable_web_page_preview=True,
+    )
     if order.qr_image:
         try:
             with open(order.qr_image.path, 'rb') as fh:
@@ -804,9 +801,9 @@ class Command(BaseCommand):
             if data.startswith('plan:'):
                 plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
                 user.refresh_from_db()
-                rows = []
-                if user.wallet_balance_toman >= Decimal(plan.price_toman):
-                    rows.append([('👛 پرداخت از کیف پول', f'buy:{plan.pk}')])
+                # Always offered: when the balance falls short the handler
+                # explains by how much and offers to top up.
+                rows = [[(f'👛 کیف پول ({toman(user.wallet_balance_toman)})', f'buy:{plan.pk}')]]
                 rows.append([('🪙 پرداخت با کریپتو (ارزان‌تر)', f'cryptobuy:{plan.pk}')])
                 if site_now.card_to_card_enabled:
                     rows.append([('💳 کارت‌به‌کارت', f'cardbuy:{plan.pk}')])

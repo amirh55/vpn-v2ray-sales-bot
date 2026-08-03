@@ -2,29 +2,14 @@ from __future__ import annotations
 
 import hmac
 import json
-from decimal import Decimal
 
 from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden, JsonResponse
-from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
-from telebot import TeleBot
 
-from sales.models import Payment, Plan, SiteSetting, TelegramUser, WalletTransaction
+from sales.models import Payment, SiteSetting
 from sales.services.cardpay import process_incoming_sms
 from sales.services.oxapay import validate_webhook_signature
-from sales.services.provisioning import create_order_from_wallet, provision_order
-from sales.services.formatting import toman
-
-
-def _send_bot_message(chat_id: int, text: str):
-    site = SiteSetting.get_solo()
-    if not site.telegram_bot_token:
-        return
-    bot = TeleBot(site.telegram_bot_token, parse_mode='HTML')
-    try:
-        bot.send_message(chat_id, text, disable_web_page_preview=True)
-    except Exception:
-        pass
+from sales.services.payments import settle_payment
 
 
 # Field names used by the various Android SMS forwarder apps.
@@ -126,38 +111,8 @@ def oxapay_webhook(request):
         return HttpResponse('ok', content_type='text/plain')
 
     if status == 'paid':
-        if payment.status != Payment.Status.PAID:
-            with transaction.atomic():
-                payment = Payment.objects.select_for_update().select_related('user').get(pk=payment.pk)
-                if payment.status == Payment.Status.PAID:
-                    return HttpResponse('ok', content_type='text/plain')
-                payment.status = Payment.Status.PAID
-                payment.save(update_fields=['status', 'track_id', 'raw_payload', 'updated_at'])
-                user = TelegramUser.objects.select_for_update().get(pk=payment.user.pk)
-                user.wallet_balance_toman += Decimal(payment.amount_toman)
-                user.save(update_fields=['wallet_balance_toman', 'updated_at'])
-                WalletTransaction.objects.create(
-                    user=user,
-                    kind=WalletTransaction.Kind.CREDIT,
-                    amount_toman=payment.amount_toman,
-                    balance_after_toman=user.wallet_balance_toman,
-                    description=f'شارژ کیف پول با OxaPay / {payment.order_id}',
-                )
-            _send_bot_message(user.chat_id, f'✅ پرداخت شما تایید شد و کیف پولتان به مبلغ {toman(payment.amount_toman)} شارژ شد.')
-
-            if payment.auto_purchase_after_paid and payment.pending_plan_id:
-                try:
-                    plan = Plan.objects.get(pk=payment.pending_plan_id)
-                    order = create_order_from_wallet(user, plan)
-                    order = provision_order(order)
-                    text = '✅ خرید اشتراک با موفقیت انجام شد.\n\n'
-                    if order.config_link:
-                        text += f'🔗 لینک کانفیگ:\n<code>{order.config_link}</code>\n\n'
-                    if order.subscription_link:
-                        text += f'🔄 لینک سابسکریپشن:\n<code>{order.subscription_link}</code>\n'
-                    _send_bot_message(user.chat_id, text)
-                except Exception as exc:  # noqa: BLE001
-                    _send_bot_message(user.chat_id, f'پرداخت تایید شد، اما ساخت خودکار سرویس خطا داد. پشتیبانی بررسی می‌کند.\nخطا: {exc}')
+        payment.save(update_fields=['track_id', 'raw_payload', 'updated_at'])
+        settle_payment(payment)
         return HttpResponse('ok', content_type='text/plain')
 
     if status in ['failed', 'expired', 'cancelled', 'canceled']:

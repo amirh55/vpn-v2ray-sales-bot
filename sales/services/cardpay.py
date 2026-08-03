@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from sales.models import BankSms, CardPaymentRequest, SiteSetting, TelegramUser, WalletTransaction
+from sales.services.delivery import send_order, send_text
 from sales.services.provisioning import create_order_from_wallet, provision_order
 from sales.services.banksms import (
     extract_amounts_toman,
@@ -90,8 +91,31 @@ def approve_request(request: CardPaymentRequest, *, auto: bool, note: str = '') 
             ).strip()
             locked.save(update_fields=['admin_note', 'updated_at'])
 
+    # Deliver straight away rather than waiting for the bot's watcher, so the
+    # operator sees the result immediately. The watcher still covers anything
+    # left unnotified here, which is why notified_at is only stamped on success.
+    if notify_customer(locked):
+        locked.notified_at = timezone.now()
+        locked.save(update_fields=['notified_at', 'updated_at'])
+
     request.refresh_from_db()
     return True
+
+
+def notify_customer(request: CardPaymentRequest) -> bool:
+    """Tell the customer their transfer landed, with the config when there is one."""
+    if request.created_order_id:
+        return send_order(request.created_order)
+    if request.auto_purchase_after_paid and request.pending_plan_id:
+        return send_text(
+            request.user.chat_id,
+            '✅ واریز شما تایید و کیف پولتان شارژ شد، اما ساخت خودکار سرویس انجام نشد. '
+            'پشتیبانی پیگیری می‌کند.',
+        )
+    return send_text(
+        request.user.chat_id,
+        f'✅ واریز شما شناسایی شد.\nکیف پول شما به مبلغ {int(request.amount_toman):,} تومان شارژ شد.',
+    )
 
 
 def process_incoming_sms(sender: str, text: str) -> BankSms:

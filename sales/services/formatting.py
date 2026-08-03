@@ -38,7 +38,10 @@ def traffic_text(gb) -> str:
         val = Decimal('0')
     if val == 0:
         return 'نامحدود'
-    return fa_digits(f'{val.normalize()} گیگابایت')
+    # normalize() turns 40 into 4E+1, which reached customers as "۴E+۱".
+    if val == val.to_integral_value():
+        return fa_digits(f'{int(val):,}') + ' گیگابایت'
+    return fa_digits(f'{val.normalize():f}'.rstrip('0').rstrip('.')) + ' گیگابایت'
 
 
 def days_text(days: int) -> str:

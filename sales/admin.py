@@ -13,6 +13,9 @@ from unfold.admin import ModelAdmin, TabularInline
 
 from .services.backup import RestoreError, backup_filename, create_backup, restore_backup
 from .services.cardpay import approve_request
+from .services.delivery import send_order
+from .services.payments import settle_payment
+from .services.provisioning import provision_order
 
 from .models import (
     BankSms,
@@ -217,11 +220,46 @@ class TelegramUserAdmin(ModelAdmin):
         return f'{obj.first_name} {obj.last_name}'.strip()
 
 
+@admin.action(description='ارسال دوباره کانفیگ به کاربر در تلگرام')
+def resend_order_config(modeladmin, request, queryset):
+    sent = failed = 0
+    for order in queryset:
+        if send_order(order):
+            sent += 1
+        else:
+            failed += 1
+    if sent:
+        messages.success(request, f'کانفیگ {sent} سفارش دوباره برای کاربر ارسال شد.')
+    if failed:
+        messages.error(
+            request,
+            f'{failed} مورد ارسال نشد. توکن ربات را بررسی کنید و مطمئن شوید کاربر ربات را بلاک نکرده است.',
+        )
+
+
+@admin.action(description='ساخت سرویس در پنل و ارسال به کاربر')
+def provision_and_send(modeladmin, request, queryset):
+    # For orders whose payment landed but whose 3x-ui call failed at the time.
+    done = failed = 0
+    for order in queryset:
+        try:
+            order = provision_order(order)
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            messages.error(request, f'سفارش #{order.pk}: ساخت سرویس ناموفق بود: {exc}')
+            continue
+        send_order(order)
+        done += 1
+    if done:
+        messages.success(request, f'{done} سرویس ساخته و برای کاربر ارسال شد.')
+
+
 @admin.register(Order)
 class OrderAdmin(ModelAdmin):
     list_display = ('id', 'user', 'service', 'plan', 'status', 'source', 'amount_toman', 'expires_at', 'created_at')
     list_filter = ('status', 'source', 'service', 'plan')
     search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid')
+    actions = [resend_order_config, provision_and_send]
     readonly_fields = ('config_link_click', 'subscription_link_click', 'qr_preview', 'created_at', 'updated_at')
     fieldsets = (
         ('سفارش', {'fields': ('user', 'service', 'plan', 'source', 'status', 'amount_usd', 'amount_toman', 'admin_note')}),
@@ -257,12 +295,36 @@ class WalletTransactionAdmin(ModelAdmin):
     readonly_fields = ('created_at', 'updated_at')
 
 
+@admin.action(description='تایید دستی پرداخت، شارژ کیف پول و تحویل سرویس')
+def approve_payments_manually(modeladmin, request, queryset):
+    """Rescue payments whose gateway callback never arrived."""
+    done = skipped = 0
+    for payment in queryset:
+        if payment.status == Payment.Status.PAID:
+            skipped += 1
+            continue
+        try:
+            settle_payment(payment, note=f'تایید دستی توسط {request.user.username}')
+        except Exception as exc:  # noqa: BLE001
+            messages.error(request, f'پرداخت {payment.order_id}: {exc}')
+            continue
+        done += 1
+    if done:
+        messages.success(
+            request,
+            f'{done} پرداخت تایید شد. کیف پول شارژ شد و اگر پلنی در انتظار بود، سرویس ساخته و ارسال شد.',
+        )
+    if skipped:
+        messages.warning(request, f'{skipped} مورد از قبل پرداخت‌شده بود و دوباره پردازش نشد.')
+
+
 @admin.register(Payment)
 class PaymentAdmin(ModelAdmin):
     list_display = ('order_id', 'user', 'provider', 'purpose', 'status', 'amount_toman', 'amount_usd', 'track_id', 'created_at')
     list_filter = ('provider', 'purpose', 'status')
     search_fields = ('order_id', 'track_id', 'user__chat_id', 'user__username')
     readonly_fields = ('raw_payload', 'created_at', 'updated_at')
+    actions = [approve_payments_manually]
 
 
 @admin.register(SupportMessage)
