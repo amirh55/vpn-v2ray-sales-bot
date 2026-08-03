@@ -51,7 +51,7 @@ def make_safe_xui_email(order: Order, client_uuid: str) -> str:
     """
     raw = f'u{order.user.chat_id}o{order.pk}{client_uuid[:8]}'
     safe = re.sub(r'[^A-Za-z0-9-]', '', raw).lower()
-    return safe[:64] or f'u{client_uuid.replace('-', '')[:12]}'
+    return safe[:64] or f'u{client_uuid.replace("-", "")[:12]}'
 
 
 def build_client_payload(order: Order, client_uuid: str, client_email: str, expires_at) -> dict:
