@@ -40,9 +40,10 @@ def oxapay_webhook(request):
     except json.JSONDecodeError:
         return HttpResponseBadRequest('bad json')
 
+    # v1 sends snake_case, the legacy API sends camelCase.
     status = str(payload.get('status', '')).lower()
-    order_id = str(payload.get('order_id') or '')
-    track_id = str(payload.get('track_id') or '')
+    order_id = str(payload.get('order_id') or payload.get('orderId') or '')
+    track_id = str(payload.get('track_id') or payload.get('trackId') or '')
 
     payment = None
     if order_id:

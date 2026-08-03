@@ -13,7 +13,12 @@ import httpx
 from django.core.management.base import BaseCommand
 
 from sales.models import SiteSetting
-from sales.services.oxapay import OXAPAY_INVOICE_URL, get_merchant_key
+from sales.services.oxapay import (
+    LEGACY_SUCCESS_CODE,
+    OXAPAY_INVOICE_URL,
+    OXAPAY_LEGACY_INVOICE_URL,
+    get_merchant_key,
+)
 
 
 class Command(BaseCommand):
@@ -57,18 +62,16 @@ class Command(BaseCommand):
             ))
         self.stdout.write('')
 
-        payload = {
-            'amount': 1,
-            'currency': 'USD',
-            'lifetime': 60,
-            'description': 'vpnshop key check',
-            'sandbox': True,
-        }
-        headers = {'merchant_api_key': key, 'Content-Type': 'application/json'}
-
+        # --- new v1 API ---
+        self.stdout.write('  [۱] تست روی API جدید (v1)')
         try:
             with httpx.Client(timeout=30) as client:
-                response = client.post(OXAPAY_INVOICE_URL, json=payload, headers=headers)
+                response = client.post(
+                    OXAPAY_INVOICE_URL,
+                    json={'amount': 1, 'currency': 'USD', 'lifetime': 60,
+                          'description': 'vpnshop key check', 'sandbox': True},
+                    headers={'merchant_api_key': key, 'Content-Type': 'application/json'},
+                )
         except Exception as exc:  # noqa: BLE001
             self.stdout.write(self.style.ERROR(f'  ارتباط با OxaPay برقرار نشد: {exc}'))
             self.stdout.write('  اینترنت سرور یا دسترسی به api.oxapay.com را بررسی کنید.')
@@ -78,26 +81,51 @@ class Command(BaseCommand):
             data = response.json()
         except ValueError:
             data = {}
-
-        message = data.get('message') if isinstance(data, dict) else None
-        api_status = data.get('status') if isinstance(data, dict) else None
         invoice = (data.get('data') or {}) if isinstance(data, dict) else {}
-
-        self.stdout.write(f'  کد HTTP: {response.status_code}')
-        if api_status:
-            self.stdout.write(f'  status در پاسخ: {api_status}')
-        if message:
-            self.stdout.write(f'  پیام درگاه: {message}')
-        self.stdout.write('')
-
         pay_url = invoice.get('payment_url') if isinstance(invoice, dict) else None
+
+        self.stdout.write(f'      کد HTTP: {response.status_code}')
+        if isinstance(data, dict) and data.get('message'):
+            self.stdout.write(f'      پیام: {data["message"]}')
+
         if pay_url:
-            self.stdout.write(self.style.SUCCESS('  ✅ کلید سالم است و فاکتور تستی ساخته شد.'))
+            self.stdout.write('')
+            self.stdout.write(self.style.SUCCESS('  ✅ کلید روی API جدید سالم است.'))
             self.stdout.write(f'  لینک پرداخت تستی: {pay_url}')
             self.stdout.write(line)
             return
 
-        self.stdout.write(self.style.ERROR('  ❌ ساخت فاکتور ناموفق بود.'))
+        # --- legacy API ---
+        self.stdout.write('')
+        self.stdout.write('  [۲] تست روی API قدیمی (legacy)')
+        try:
+            with httpx.Client(timeout=30) as client:
+                legacy = client.post(
+                    OXAPAY_LEGACY_INVOICE_URL,
+                    json={'merchant': key, 'amount': 1, 'currency': 'USD', 'lifeTime': 60,
+                          'description': 'vpnshop key check'},
+                    headers={'Content-Type': 'application/json'},
+                )
+            legacy_data = legacy.json()
+        except Exception as exc:  # noqa: BLE001
+            legacy_data = {}
+            self.stdout.write(self.style.ERROR(f'      ارتباط ناموفق: {exc}'))
+
+        if isinstance(legacy_data, dict) and legacy_data.get('message'):
+            self.stdout.write(f'      پیام: {legacy_data["message"]}')
+
+        if isinstance(legacy_data, dict) and legacy_data.get('result') == LEGACY_SUCCESS_CODE:
+            self.stdout.write('')
+            self.stdout.write(self.style.SUCCESS(
+                '  ✅ کلید شما از نوع قدیمی است و روی API قدیمی کار می‌کند.'
+            ))
+            self.stdout.write(f'  لینک پرداخت تستی: {legacy_data.get("payLink")}')
+            self.stdout.write('  ربات این حالت را خودکار تشخیص می‌دهد؛ کاری لازم نیست.')
+            self.stdout.write(line)
+            return
+
+        self.stdout.write('')
+        self.stdout.write(self.style.ERROR('  ❌ کلید روی هیچ‌کدام از دو API کار نکرد.'))
         self.stdout.write('')
         self.stdout.write('  رایج‌ترین علت: نوع کلید اشتباه است.')
         self.stdout.write('  - Merchant API Key: برای ساخت فاکتور و دریافت پرداخت. همین لازم است.')
