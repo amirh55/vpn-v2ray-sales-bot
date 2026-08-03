@@ -141,6 +141,19 @@ cmd_oxapay() {
   manage oxapay_check "$@"
 }
 
+cmd_backup() {
+  manage backup "$@"
+}
+
+cmd_restore() {
+  local file="${1:-}"
+  [ -n "$file" ] || die "مسیر فایل پشتیبان را وارد کنید:  vpnshop restore /path/to/backup.zip"
+  manage restore "$file" --yes
+  need_root
+  systemctl restart "$WEB_SERVICE" "$BOT_SERVICE"
+  green "سرویس‌ها ری‌استارت شدند."
+}
+
 cmd_help() {
   cat <<'EOF'
 vpnshop - مدیریت ربات فروش VPN
@@ -157,6 +170,8 @@ vpnshop - مدیریت ربات فروش VPN
   vpnshop passwd <user>     تغییر رمز عبور یک کاربر مدیر
   vpnshop adduser           ساخت کاربر مدیر جدید
   vpnshop oxapay            تست کلید درگاه OxaPay و نمایش پاسخ واقعی درگاه
+  vpnshop backup            ساخت فایل پشتیبان از داده‌ها و فایل‌ها
+  vpnshop restore <file>    بازگردانی از فایل پشتیبان و ری‌استارت سرویس‌ها
 EOF
 }
 
@@ -175,6 +190,8 @@ main() {
     passwd) cmd_passwd "$@" ;;
     adduser) cmd_adduser "$@" ;;
     oxapay) cmd_oxapay "$@" ;;
+    backup) cmd_backup "$@" ;;
+    restore) cmd_restore "$@" ;;
     help|-h|--help) cmd_help ;;
     *) red "دستور ناشناخته: $cmd"; echo ""; cmd_help; exit 1 ;;
   esac

@@ -30,9 +30,11 @@ from sales.services.formatting import days_text, fa_digits, parse_toman, toman, 
 from sales.services.oxapay import OxaPayError, create_invoice, toman_to_usd
 from sales.services.provisioning import create_order_from_wallet, provision_order, renew_order_from_wallet
 
-BTN_NEW = '🛒 خرید اشتراک جدید'
-BTN_RENEW = '🔁 تمدید اشتراک'
-BTN_WALLET = '💳 کیف پول + شارژ'
+# Telegram gives no control over button colour, so the coloured squares stand
+# in for it: green for buying, blue for wallet and renewal.
+BTN_NEW = '🟢 خرید اشتراک جدید'
+BTN_RENEW = '🔵 تمدید اشتراک'
+BTN_WALLET = '🔵 کیف پول + شارژ'
 BTN_SERVICES = '📦 سرویس‌های من'
 BTN_ADD = '➕ افزودن اشتراک قدیمی'
 BTN_TUTORIAL = '📚 آموزش اتصال'

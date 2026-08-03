@@ -3,11 +3,15 @@ import types
 from django.conf import settings
 from django.contrib import admin, messages
 from django.db.models import Sum
+from django.http import HttpResponse, HttpResponseRedirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html
 
 from unfold.admin import ModelAdmin, TabularInline
 
+from .services.backup import RestoreError, backup_filename, create_backup, restore_backup
 from .services.cardpay import approve_request
 
 from .models import (
@@ -84,12 +88,68 @@ class SiteSettingAdmin(ModelAdmin):
             'fields': ('card_auto_confirm_enabled', 'sms_webhook_secret', 'sms_allowed_senders', 'sms_webhook_url'),
         }),
         ('متن‌ها', {'fields': ('tutorial_text', 'contact_intro_text', 'after_purchase_text')}),
+        ('پشتیبان‌گیری', {'fields': ('backup_tools',)}),
     )
 
-    readonly_fields = ('sms_webhook_url',)
+    readonly_fields = ('sms_webhook_url', 'backup_tools')
 
     def has_add_permission(self, request):
         return not SiteSetting.objects.exists()
+
+    def get_urls(self):
+        # Hung off this model because it is where operators already go, and it
+        # keeps the views behind the admin's own authentication.
+        custom = [
+            path(
+                'backup/',
+                self.admin_site.admin_view(self.backup_view),
+                name='sales_backup',
+            ),
+            path(
+                'backup/download/',
+                self.admin_site.admin_view(self.backup_download_view),
+                name='sales_backup_download',
+            ),
+        ]
+        return custom + super().get_urls()
+
+    def backup_view(self, request):
+        if request.method == 'POST':
+            uploaded = request.FILES.get('backup_file')
+            if not uploaded:
+                messages.error(request, 'فایلی انتخاب نشده است.')
+            else:
+                try:
+                    result = restore_backup(uploaded.read())
+                except RestoreError as exc:
+                    messages.error(request, str(exc))
+                else:
+                    messages.success(
+                        request,
+                        'بازگردانی انجام شد. '
+                        f'{result["media_files"]} فایل بازگردانی شد. '
+                        'برای اعمال کامل، سرویس‌ها را با vpnshop restart ری‌استارت کنید.',
+                    )
+            return HttpResponseRedirect(request.path)
+
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'پشتیبان‌گیری و بازگردانی',
+        }
+        return TemplateResponse(request, 'admin/sales/backup.html', context)
+
+    def backup_download_view(self, request):
+        response = HttpResponse(create_backup(), content_type='application/zip')
+        response['Content-Disposition'] = f'attachment; filename="{backup_filename()}"'
+        return response
+
+    @admin.display(description='پشتیبان‌گیری')
+    def backup_tools(self, obj):
+        return format_html(
+            '<a href="{}" style="text-decoration:underline;">'
+            'رفتن به صفحه پشتیبان‌گیری و بازگردانی</a>',
+            reverse('admin:sales_backup'),
+        )
 
     @admin.display(description='آدرس وبهوک پیامک')
     def sms_webhook_url(self, obj):
