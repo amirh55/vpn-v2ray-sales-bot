@@ -9,7 +9,7 @@
 - سرویس‌های من و ارسال مجدد لینک‌ها
 - آموزش اتصال
 - ارتباط با پشتیبانی بدون نمایش اطلاعات مدیر به کاربر
-- پنل مدیریت Django برای تنظیم ربات، OxaPay، پنل 3x-ui، سرویس‌ها و پلن‌ها
+- پنل مدیریت گرافیکی و مدرن (django-unfold) با داشبورد آماری برای تنظیم ربات، OxaPay، پنل 3x-ui، سرویس‌ها و پلن‌ها
 - قیمت‌گذاری دلاری با تبدیل خودکار به تومان بر اساس نرخ دلار قابل تنظیم در پنل
 - اتصال به 3x-ui با API Token و انتخاب Inbound برای هر سرویس
 - ارسال لینک کانفیگ، لینک Subscription و QR Code
@@ -31,10 +31,16 @@ python manage.py createsuperuser
 python manage.py runserver 0.0.0.0:8000
 ```
 
-پنل مدیریت:
+پنل مدیریت (با تم گرافیکی جدید django-unfold، شامل داشبورد آماری و سایدبار دسته‌بندی‌شده):
 
 ```text
 http://YOUR_SERVER:8000/admin/
+```
+
+نکته: چون یک اپ استاتیک جدید (`unfold`) اضافه شده، بعد از `pip install -r requirements.txt` یک بار هم این دستور را اجرا کنید تا فایل‌های استاتیک تم جمع‌آوری شوند:
+
+```bash
+python manage.py collectstatic --noinput
 ```
 
 برای اجرای ربات در یک ترمینال جدا:
@@ -276,6 +282,8 @@ sales/services/oxapay.py               اتصال به OxaPay
 sales/services/xui.py                  اتصال به 3x-ui
 sales/services/provisioning.py         ساخت و تمدید سرویس
 sales/views.py                         Webhook پرداخت
+vpnshop/settings.py                    تنظیمات UNFOLD (رنگ، سایدبار، برندینگ پنل)
+templates/admin/index.html             کارت‌های داشبورد آماری پنل مدیریت
 ```
 
 ---

@@ -1,5 +1,11 @@
+import types
+
 from django.contrib import admin, messages
+from django.db.models import Sum
+from django.utils import timezone
 from django.utils.html import format_html
+
+from unfold.admin import ModelAdmin, TabularInline
 
 from .models import (
     Broadcast,
@@ -19,9 +25,47 @@ admin.site.site_header = 'پنل مدیریت فروش کانفیگ VPN'
 admin.site.site_title = 'فروشگاه VPN'
 admin.site.index_title = 'مدیریت ربات، فروش، کیف پول و پنل 3x-ui'
 
+_default_admin_index = admin.site.__class__.index
+
+
+def _dashboard_index(self, request, extra_context=None):
+    now = timezone.now()
+    month_start = now.date().replace(day=1)
+    revenue_this_month = Order.objects.filter(
+        status__in=[Order.Status.PAID, Order.Status.PROVISIONED],
+        created_at__date__gte=month_start,
+    ).aggregate(total=Sum('amount_toman'))['total'] or 0
+    wallet_total = TelegramUser.objects.aggregate(total=Sum('wallet_balance_toman'))['total'] or 0
+
+    extra_context = extra_context or {}
+    extra_context['kpi_cards'] = [
+        {'title': 'کاربران ربات', 'value': TelegramUser.objects.count(), 'icon': 'group'},
+        {
+            'title': 'اشتراک‌های فعال',
+            'value': Order.objects.filter(status=Order.Status.PROVISIONED, expires_at__gt=now).count(),
+            'icon': 'vpn_lock',
+        },
+        {'title': 'درآمد این ماه (تومان)', 'value': f'{int(revenue_this_month):,}', 'icon': 'payments'},
+        {
+            'title': 'درخواست کارت‌به‌کارت در انتظار',
+            'value': CardPaymentRequest.objects.filter(status=CardPaymentRequest.Status.PENDING).count(),
+            'icon': 'credit_card',
+        },
+        {
+            'title': 'پیام پشتیبانی بی‌پاسخ',
+            'value': SupportMessage.objects.filter(is_answered=False).count(),
+            'icon': 'support_agent',
+        },
+        {'title': 'مجموع موجودی کیف‌پول کاربران (تومان)', 'value': f'{int(wallet_total):,}', 'icon': 'account_balance_wallet'},
+    ]
+    return _default_admin_index(self, request, extra_context)
+
+
+admin.site.index = types.MethodType(_dashboard_index, admin.site)
+
 
 @admin.register(SiteSetting)
-class SiteSettingAdmin(admin.ModelAdmin):
+class SiteSettingAdmin(ModelAdmin):
     fieldsets = (
         ('ربات و پشتیبانی', {'fields': ('title', 'telegram_bot_token', 'support_chat_id', 'admin_chat_id', 'is_shop_active')}),
         ('قیمت و درگاه', {'fields': ('dollar_rate_toman', 'oxapay_merchant_api_key', 'oxapay_sandbox', 'invoice_lifetime_minutes', 'oxapay_fee_paid_by_payer')}),
@@ -34,13 +78,13 @@ class SiteSettingAdmin(admin.ModelAdmin):
 
 
 @admin.register(XUIPanel)
-class XUIPanelAdmin(admin.ModelAdmin):
+class XUIPanelAdmin(ModelAdmin):
     list_display = ('name', 'base_url', 'api_base_path', 'is_active', 'updated_at')
     list_filter = ('is_active', 'verify_ssl')
     search_fields = ('name', 'base_url')
 
 
-class PlanInline(admin.TabularInline):
+class PlanInline(TabularInline):
     model = Plan
     extra = 1
     fields = ('name', 'price_usd', 'price_toman_preview', 'duration_days', 'traffic_gb', 'user_limit', 'sort_order', 'is_active')
@@ -54,7 +98,7 @@ class PlanInline(admin.TabularInline):
 
 
 @admin.register(Service)
-class ServiceAdmin(admin.ModelAdmin):
+class ServiceAdmin(ModelAdmin):
     list_display = ('name', 'panel', 'inbound_id', 'inbound_remark', 'sort_order', 'is_active')
     list_filter = ('is_active', 'panel')
     search_fields = ('name', 'description', 'inbound_remark')
@@ -66,7 +110,7 @@ class ServiceAdmin(admin.ModelAdmin):
 
 
 @admin.register(Plan)
-class PlanAdmin(admin.ModelAdmin):
+class PlanAdmin(ModelAdmin):
     list_display = ('name', 'service', 'price_usd', 'price_toman_col', 'duration_days', 'traffic_gb', 'user_limit', 'is_active')
     list_filter = ('is_active', 'service')
     search_fields = ('name', 'description', 'service__name')
@@ -78,7 +122,7 @@ class PlanAdmin(admin.ModelAdmin):
 
 
 @admin.register(TelegramUser)
-class TelegramUserAdmin(admin.ModelAdmin):
+class TelegramUserAdmin(ModelAdmin):
     list_display = ('chat_id', 'username', 'full_name', 'wallet_balance_toman', 'is_blocked', 'created_at')
     list_filter = ('is_blocked',)
     search_fields = ('chat_id', 'username', 'first_name', 'last_name')
@@ -90,7 +134,7 @@ class TelegramUserAdmin(admin.ModelAdmin):
 
 
 @admin.register(Order)
-class OrderAdmin(admin.ModelAdmin):
+class OrderAdmin(ModelAdmin):
     list_display = ('id', 'user', 'service', 'plan', 'status', 'source', 'amount_toman', 'expires_at', 'created_at')
     list_filter = ('status', 'source', 'service', 'plan')
     search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid')
@@ -122,7 +166,7 @@ class OrderAdmin(admin.ModelAdmin):
 
 
 @admin.register(WalletTransaction)
-class WalletTransactionAdmin(admin.ModelAdmin):
+class WalletTransactionAdmin(ModelAdmin):
     list_display = ('user', 'kind', 'amount_toman', 'balance_after_toman', 'order', 'created_at')
     list_filter = ('kind',)
     search_fields = ('user__chat_id', 'description')
@@ -130,7 +174,7 @@ class WalletTransactionAdmin(admin.ModelAdmin):
 
 
 @admin.register(Payment)
-class PaymentAdmin(admin.ModelAdmin):
+class PaymentAdmin(ModelAdmin):
     list_display = ('order_id', 'user', 'provider', 'purpose', 'status', 'amount_toman', 'amount_usd', 'track_id', 'created_at')
     list_filter = ('provider', 'purpose', 'status')
     search_fields = ('order_id', 'track_id', 'user__chat_id', 'user__username')
@@ -138,7 +182,7 @@ class PaymentAdmin(admin.ModelAdmin):
 
 
 @admin.register(SupportMessage)
-class SupportMessageAdmin(admin.ModelAdmin):
+class SupportMessageAdmin(ModelAdmin):
     list_display = ('user', 'short_text', 'is_answered', 'created_at')
     list_filter = ('is_answered',)
     search_fields = ('user__chat_id', 'user__username', 'message_text')
@@ -169,7 +213,7 @@ def approve_card_requests(modeladmin, request, queryset):
 
 
 @admin.register(CardPaymentRequest)
-class CardPaymentRequestAdmin(admin.ModelAdmin):
+class CardPaymentRequestAdmin(ModelAdmin):
     list_display = ('id', 'user', 'amount_toman', 'status', 'receipt_text', 'created_at')
     list_filter = ('status',)
     search_fields = ('user__chat_id', 'user__username', 'receipt_text')
@@ -183,7 +227,7 @@ def queue_broadcasts(modeladmin, request, queryset):
 
 
 @admin.register(Broadcast)
-class BroadcastAdmin(admin.ModelAdmin):
+class BroadcastAdmin(ModelAdmin):
     list_display = ('title', 'target_chat_id', 'status', 'sent_count', 'failed_count', 'updated_at')
     list_filter = ('status',)
     search_fields = ('title', 'text', 'target_chat_id')

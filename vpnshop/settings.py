@@ -1,5 +1,7 @@
 from pathlib import Path
 import os
+from django.urls import reverse_lazy
+from django.utils.translation import gettext_lazy as _
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -21,6 +23,7 @@ ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '127.0.0.1,localh
 PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', 'http://127.0.0.1:8000').rstrip('/')
 
 INSTALLED_APPS = [
+    'unfold',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -92,3 +95,105 @@ _csrf_public = os.getenv('PUBLIC_BASE_URL')
 CSRF_TRUSTED_ORIGINS = [u for u in [_csrf_public] if u and u.startswith('http')]
 
 # Production hints: set DEBUG=0, use PostgreSQL, HTTPS, and a process manager.
+
+UNFOLD = {
+    'SITE_TITLE': 'فروشگاه VPN',
+    'SITE_HEADER': 'پنل مدیریت فروش VPN',
+    'SITE_SUBHEADER': 'ربات، سرویس‌ها، پرداخت و کاربران',
+    'SITE_SYMBOL': 'bolt',
+    'SHOW_HISTORY': True,
+    'SHOW_VIEW_ON_SITE': False,
+    'COLORS': {
+        'primary': {
+            '50': '239 246 255', '100': '219 234 254', '200': '191 219 254',
+            '300': '147 197 253', '400': '96 165 250', '500': '59 130 246',
+            '600': '37 99 235', '700': '29 78 216', '800': '30 64 175',
+            '900': '30 58 138', '950': '23 37 84',
+        },
+    },
+    'SIDEBAR': {
+        'show_search': True,
+        'show_all_applications': False,
+        'navigation': [
+            {
+                'title': _('ربات و تنظیمات'),
+                'separator': True,
+                'items': [
+                    {
+                        'title': _('تنظیمات اصلی ربات'),
+                        'icon': 'settings',
+                        'link': reverse_lazy('admin:sales_sitesetting_changelist'),
+                    },
+                    {
+                        'title': _('پنل‌های 3x-ui'),
+                        'icon': 'dns',
+                        'link': reverse_lazy('admin:sales_xuipanel_changelist'),
+                    },
+                ],
+            },
+            {
+                'title': _('فروش'),
+                'separator': True,
+                'items': [
+                    {
+                        'title': _('سرویس‌ها'),
+                        'icon': 'vpn_lock',
+                        'link': reverse_lazy('admin:sales_service_changelist'),
+                    },
+                    {
+                        'title': _('پلن‌های اشتراک'),
+                        'icon': 'sell',
+                        'link': reverse_lazy('admin:sales_plan_changelist'),
+                    },
+                    {
+                        'title': _('سفارش‌ها/اشتراک‌ها'),
+                        'icon': 'shopping_cart',
+                        'link': reverse_lazy('admin:sales_order_changelist'),
+                    },
+                ],
+            },
+            {
+                'title': _('مالی'),
+                'separator': True,
+                'items': [
+                    {
+                        'title': _('پرداخت‌ها'),
+                        'icon': 'payments',
+                        'link': reverse_lazy('admin:sales_payment_changelist'),
+                    },
+                    {
+                        'title': _('تراکنش‌های کیف پول'),
+                        'icon': 'account_balance_wallet',
+                        'link': reverse_lazy('admin:sales_wallettransaction_changelist'),
+                    },
+                    {
+                        'title': _('درخواست‌های کارت‌به‌کارت'),
+                        'icon': 'credit_card',
+                        'link': reverse_lazy('admin:sales_cardpaymentrequest_changelist'),
+                    },
+                ],
+            },
+            {
+                'title': _('کاربران و پیام‌رسانی'),
+                'separator': True,
+                'items': [
+                    {
+                        'title': _('کاربران تلگرام'),
+                        'icon': 'group',
+                        'link': reverse_lazy('admin:sales_telegramuser_changelist'),
+                    },
+                    {
+                        'title': _('پیام‌های پشتیبانی'),
+                        'icon': 'support_agent',
+                        'link': reverse_lazy('admin:sales_supportmessage_changelist'),
+                    },
+                    {
+                        'title': _('ارسال پیام گروهی/تکی'),
+                        'icon': 'campaign',
+                        'link': reverse_lazy('admin:sales_broadcast_changelist'),
+                    },
+                ],
+            },
+        ],
+    },
+}
