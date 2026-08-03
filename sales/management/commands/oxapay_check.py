@@ -17,7 +17,6 @@ from sales.services.oxapay import (
     LEGACY_SUCCESS_CODE,
     OXAPAY_INVOICE_URL,
     OXAPAY_LEGACY_INVOICE_URL,
-    get_merchant_key,
 )
 
 

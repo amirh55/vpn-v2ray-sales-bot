@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import hmac
 import json
 from decimal import Decimal
 
-from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden
+from django.http import HttpResponse, HttpResponseBadRequest, HttpResponseForbidden, JsonResponse
 from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
 from telebot import TeleBot
 
 from sales.models import Payment, Plan, SiteSetting, TelegramUser, WalletTransaction
+from sales.services.cardpay import process_incoming_sms
 from sales.services.oxapay import validate_webhook_signature
 from sales.services.provisioning import create_order_from_wallet, provision_order
 from sales.services.formatting import toman
@@ -23,6 +25,67 @@ def _send_bot_message(chat_id: int, text: str):
         bot.send_message(chat_id, text, disable_web_page_preview=True)
     except Exception:
         pass
+
+
+# Field names used by the various Android SMS forwarder apps.
+SMS_TEXT_KEYS = ('text', 'message', 'msg', 'body', 'content', 'sms', 'Message')
+SMS_SENDER_KEYS = ('from', 'sender', 'number', 'address', 'phone', 'From')
+
+
+def _first_value(source, keys) -> str:
+    for key in keys:
+        value = source.get(key)
+        if value:
+            return str(value).strip()
+    return ''
+
+
+@csrf_exempt
+def sms_webhook(request):
+    """Receive bank SMS forwarded from the operator's phone.
+
+    Accepts JSON, form-encoded or query-string bodies so it works with whatever
+    generic forwarder app the operator installs.
+    """
+    site = SiteSetting.get_solo()
+    expected = (site.sms_webhook_secret or '').strip()
+    if not expected:
+        return HttpResponseForbidden('sms webhook is not configured')
+
+    provided = (
+        request.GET.get('secret')
+        or request.headers.get('X-Secret')
+        or request.headers.get('Authorization', '').replace('Bearer ', '')
+        or ''
+    ).strip()
+    if not hmac.compare_digest(provided, expected):
+        return HttpResponseForbidden('bad secret')
+
+    if request.method not in ('POST', 'GET'):
+        return HttpResponseBadRequest('POST required')
+
+    payload: dict = {}
+    if request.body:
+        try:
+            parsed = json.loads(request.body.decode('utf-8'))
+            if isinstance(parsed, dict):
+                payload = parsed
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            payload = {}
+    if not payload:
+        payload = {**request.GET.dict(), **request.POST.dict()}
+
+    text = _first_value(payload, SMS_TEXT_KEYS)
+    sender = _first_value(payload, SMS_SENDER_KEYS)
+    if not text:
+        return JsonResponse({'ok': False, 'error': 'no sms text found'}, status=400)
+
+    sms = process_incoming_sms(sender, text)
+    return JsonResponse({
+        'ok': True,
+        'matched': bool(sms.matched_request_id),
+        'note': sms.note,
+    })
 
 
 @csrf_exempt

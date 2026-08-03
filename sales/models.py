@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from decimal import Decimal
 from django.db import models
 from django.utils import timezone
@@ -27,6 +28,20 @@ class SiteSetting(TimeStampedModel):
 
     card_to_card_enabled = models.BooleanField('پرداخت کارت‌به‌کارت فعال باشد', default=False)
     card_to_card_text = models.TextField('متن کارت‌به‌کارت، فقط وقتی فعال باشد به کاربر نشان داده می‌شود', blank=True)
+    card_invoice_minutes = models.PositiveIntegerField('مهلت پرداخت کارت‌به‌کارت / دقیقه', default=30)
+    card_auto_confirm_enabled = models.BooleanField('تایید خودکار کارت‌به‌کارت با پیامک بانکی', default=False)
+    sms_webhook_secret = models.CharField(
+        'کلید مخفی وبهوک پیامک',
+        max_length=120,
+        blank=True,
+        help_text='در آدرس وبهوک اپ پیامک‌فرست قرار می‌گیرد. خالی بگذارید تا خودکار ساخته شود.',
+    )
+    sms_allowed_senders = models.CharField(
+        'شماره‌های مجاز بانک',
+        max_length=500,
+        blank=True,
+        help_text='با کاما جدا کنید، مثل: 200080,7575,9830000. خالی یعنی هر فرستنده‌ای پذیرفته می‌شود.',
+    )
 
     tutorial_text = models.TextField('متن آموزش اتصال', blank=True, default='آموزش اتصال را از این بخش تنظیم کنید.')
     contact_intro_text = models.TextField('متن بخش ارتباط با ما', blank=True, default='پیام خود را ارسال کنید. پشتیبانی پاسخ شما را بررسی می‌کند.')
@@ -39,6 +54,16 @@ class SiteSetting(TimeStampedModel):
 
     def __str__(self) -> str:
         return self.title
+
+    def save(self, *args, **kwargs):
+        # The operator never needs to invent this; an empty field means
+        # "generate one", which is what the field's help text promises.
+        if not self.sms_webhook_secret:
+            self.sms_webhook_secret = secrets.token_urlsafe(24)
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'sms_webhook_secret' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['sms_webhook_secret']
+        super().save(*args, **kwargs)
 
     @classmethod
     def get_solo(cls) -> 'SiteSetting':
@@ -267,9 +292,18 @@ class CardPaymentRequest(TimeStampedModel):
         REJECTED = 'rejected', 'رد شده'
 
     user = models.ForeignKey(TelegramUser, verbose_name='کاربر', on_delete=models.PROTECT)
-    amount_toman = models.DecimalField('مبلغ تومان', max_digits=18, decimal_places=0)
+    # amount_toman is the exact figure the customer must transfer. It carries a
+    # small random tail so an incoming bank SMS identifies one invoice only.
+    amount_toman = models.DecimalField('مبلغ دقیق واریز / تومان', max_digits=18, decimal_places=0)
+    base_amount_toman = models.DecimalField('مبلغ درخواستی اولیه / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
+    expires_at = models.DateTimeField('انقضای فاکتور', null=True, blank=True)
     status = models.CharField('وضعیت', max_length=20, choices=Status.choices, default=Status.PENDING)
     receipt_text = models.TextField('متن/شماره پیگیری رسید', blank=True)
+    receipt_file_id = models.CharField('شناسه تصویر رسید در تلگرام', max_length=255, blank=True)
+    auto_approved = models.BooleanField('تایید خودکار با پیامک', default=False)
+    # The webhook settles payments in the web process, which has no bot loop.
+    # This marks whether the customer has already been told.
+    notified_at = models.DateTimeField('زمان اطلاع‌رسانی به کاربر', null=True, blank=True)
     admin_note = models.TextField('یادداشت مدیر', blank=True)
 
     class Meta:
@@ -279,6 +313,39 @@ class CardPaymentRequest(TimeStampedModel):
 
     def __str__(self) -> str:
         return f'{self.user.chat_id} {self.amount_toman} {self.status}'
+
+    @property
+    def is_expired(self) -> bool:
+        return bool(self.expires_at and self.expires_at <= timezone.now())
+
+
+class BankSms(TimeStampedModel):
+    """A bank SMS forwarded from the operator's phone.
+
+    Kept even when it matches nothing, so unmatched deposits can be found by
+    hand and so a misbehaving forwarder is visible.
+    """
+
+    sender = models.CharField('شماره فرستنده', max_length=64, blank=True)
+    raw_text = models.TextField('متن پیامک')
+    parsed_amount_toman = models.DecimalField('مبلغ استخراج‌شده / تومان', max_digits=18, decimal_places=0, null=True, blank=True)
+    matched_request = models.ForeignKey(
+        CardPaymentRequest,
+        verbose_name='درخواست منطبق',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bank_messages',
+    )
+    note = models.CharField('نتیجه بررسی', max_length=255, blank=True)
+
+    class Meta:
+        verbose_name = 'پیامک بانکی'
+        verbose_name_plural = 'پیامک‌های بانکی'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.sender} {self.parsed_amount_toman or "?"}'
 
 
 class LinkedService(TimeStampedModel):

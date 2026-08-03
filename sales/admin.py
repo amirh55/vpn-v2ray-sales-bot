@@ -1,5 +1,6 @@
 import types
 
+from django.conf import settings
 from django.contrib import admin, messages
 from django.db.models import Sum
 from django.utils import timezone
@@ -7,7 +8,10 @@ from django.utils.html import format_html
 
 from unfold.admin import ModelAdmin, TabularInline
 
+from .services.cardpay import approve_request
+
 from .models import (
+    BankSms,
     Broadcast,
     CardPaymentRequest,
     LinkedService,
@@ -70,12 +74,33 @@ class SiteSettingAdmin(ModelAdmin):
     fieldsets = (
         ('ربات و پشتیبانی', {'fields': ('title', 'telegram_bot_token', 'support_chat_id', 'admin_chat_id', 'is_shop_active')}),
         ('قیمت و درگاه', {'fields': ('dollar_rate_toman', 'oxapay_merchant_api_key', 'oxapay_sandbox', 'invoice_lifetime_minutes', 'oxapay_fee_paid_by_payer')}),
-        ('کارت‌به‌کارت', {'fields': ('card_to_card_enabled', 'card_to_card_text')}),
+        ('کارت‌به‌کارت', {
+            'fields': (
+                'card_to_card_enabled', 'card_to_card_text', 'card_invoice_minutes',
+                'card_auto_confirm_enabled', 'sms_webhook_secret', 'sms_allowed_senders',
+                'sms_webhook_url',
+            ),
+        }),
         ('متن‌ها', {'fields': ('tutorial_text', 'contact_intro_text', 'after_purchase_text')}),
     )
 
+    readonly_fields = ('sms_webhook_url',)
+
     def has_add_permission(self, request):
         return not SiteSetting.objects.exists()
+
+    @admin.display(description='آدرس وبهوک پیامک')
+    def sms_webhook_url(self, obj):
+        if not obj or not obj.pk:
+            return 'بعد از ذخیره نمایش داده می‌شود'
+        if not obj.sms_webhook_secret:
+            return 'ابتدا کلید مخفی را ذخیره کنید یا خالی بگذارید تا خودکار ساخته شود'
+        url = f'{settings.PUBLIC_BASE_URL}/api/payments/sms/webhook/?secret={obj.sms_webhook_secret}'
+        return format_html(
+            'این آدرس را در اپ پیامک‌فرست گوشی وارد کنید:<br>'
+            '<code style="user-select:all;word-break:break-all;">{}</code>',
+            url,
+        )
 
 
 @admin.register(XUIPanel)
@@ -195,30 +220,53 @@ class SupportMessageAdmin(ModelAdmin):
 
 @admin.action(description='تایید و شارژ کیف پول')
 def approve_card_requests(modeladmin, request, queryset):
-    count = 0
+    # Expired invoices are approved too: the customer may have paid late or the
+    # bank SMS may never have arrived, and the operator has seen the receipt.
+    count = skipped = 0
     for req in queryset.filter(status=CardPaymentRequest.Status.PENDING):
-        user = req.user
-        user.wallet_balance_toman += req.amount_toman
-        user.save(update_fields=['wallet_balance_toman', 'updated_at'])
-        WalletTransaction.objects.create(
-            user=user,
-            kind=WalletTransaction.Kind.CREDIT,
-            amount_toman=req.amount_toman,
-            balance_after_toman=user.wallet_balance_toman,
-            description=f'تایید کارت‌به‌کارت #{req.pk}',
-        )
-        req.status = CardPaymentRequest.Status.APPROVED
-        req.save(update_fields=['status', 'updated_at'])
-        count += 1
-    messages.success(request, f'{count} درخواست تایید و کیف پول شارژ شد. برای اطلاع به کاربر، یک Broadcast تکی بسازید یا از ربات استفاده کنید.')
+        if approve_request(req, auto=False, note=f'تایید دستی توسط {request.user.username}'):
+            count += 1
+        else:
+            skipped += 1
+    text = f'{count} درخواست تایید و کیف پول شارژ شد. کاربر خودکار مطلع می‌شود.'
+    if skipped:
+        text += f' {skipped} مورد قبلاً تایید شده بود.'
+    messages.success(request, text)
 
 
 @admin.register(CardPaymentRequest)
 class CardPaymentRequestAdmin(ModelAdmin):
-    list_display = ('id', 'user', 'amount_toman', 'status', 'receipt_text', 'created_at')
-    list_filter = ('status',)
-    search_fields = ('user__chat_id', 'user__username', 'receipt_text')
+    list_display = (
+        'id', 'user', 'amount_toman', 'status', 'auto_approved',
+        'expiry_state', 'has_receipt', 'created_at',
+    )
+    list_filter = ('status', 'auto_approved')
+    search_fields = ('user__chat_id', 'user__username', 'receipt_text', 'amount_toman')
+    readonly_fields = ('base_amount_toman', 'expires_at', 'auto_approved', 'notified_at', 'created_at', 'updated_at')
     actions = [approve_card_requests]
+
+    @admin.display(description='مهلت', boolean=False)
+    def expiry_state(self, obj):
+        if not obj.expires_at:
+            return '-'
+        if obj.status == CardPaymentRequest.Status.APPROVED:
+            return 'تایید شده'
+        return 'منقضی' if obj.is_expired else 'باز'
+
+    @admin.display(description='رسید', boolean=True)
+    def has_receipt(self, obj):
+        return bool(obj.receipt_text or obj.receipt_file_id)
+
+
+@admin.register(BankSms)
+class BankSmsAdmin(ModelAdmin):
+    list_display = ('created_at', 'sender', 'parsed_amount_toman', 'matched_request', 'note')
+    list_filter = ('note',)
+    search_fields = ('sender', 'raw_text', 'note')
+    readonly_fields = ('sender', 'raw_text', 'parsed_amount_toman', 'matched_request', 'note', 'created_at', 'updated_at')
+
+    def has_add_permission(self, request):
+        return False
 
 
 @admin.register(LinkedService)

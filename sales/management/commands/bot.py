@@ -24,6 +24,7 @@ from sales.models import (
     TelegramUser,
     WalletTransaction,
 )
+from sales.services.cardpay import create_request as create_card_request
 from sales.services.linking import LinkingError, link_config, refresh_usage, usage_text
 from sales.services.formatting import days_text, fa_digits, parse_toman, toman, traffic_text, usd
 from sales.services.oxapay import OxaPayError, create_invoice, toman_to_usd
@@ -276,6 +277,19 @@ def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
     send_or_edit(bot, chat_id, text, inline(rows), call=call)
 
 
+def card_invoice_text(site: SiteSetting, req: CardPaymentRequest) -> str:
+    """Explain the exact figure to transfer and why it must be exact."""
+    minutes = int(site.card_invoice_minutes or 30)
+    return (
+        f'{site.card_to_card_text}\n\n'
+        f'💰 مبلغ دقیق واریز: <b>{toman(req.amount_toman)}</b>\n\n'
+        '⚠️ حتماً <b>دقیقاً همین مبلغ</b> را واریز کنید. '
+        'رقم‌های آخر مخصوص سفارش شماست و با آن پرداختتان خودکار شناسایی می‌شود.\n'
+        f'⏱ مهلت پرداخت: {fa_digits(minutes)} دقیقه\n\n'
+        'بعد از واریز، عکس رسید یا شماره پیگیری را همین‌جا ارسال کنید.'
+    )
+
+
 def prompt_add_service(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
     user.state = 'awaiting_config_link'
     user.save(update_fields=['state', 'updated_at'])
@@ -353,6 +367,36 @@ def route_main_action(bot: TeleBot, user: TelegramUser, chat_id: int, action: st
         show_contact(bot, user, chat_id)
     else:
         send_main_menu(bot, chat_id)
+
+
+def notify_auto_approved_cards(bot: TeleBot):
+    """Tell customers as soon as their transfer is recognised.
+
+    The SMS webhook runs in the web process, so it cannot message anyone. This
+    watcher lives in the bot process and picks up what the webhook settled.
+    """
+    while True:
+        try:
+            pending = CardPaymentRequest.objects.filter(
+                status=CardPaymentRequest.Status.APPROVED,
+                auto_approved=True,
+                notified_at__isnull=True,
+            ).select_related('user')[:20]
+            for req in pending:
+                try:
+                    bot.send_message(
+                        req.user.chat_id,
+                        '✅ واریز شما شناسایی شد.\n'
+                        f'کیف پول شما به مبلغ {toman(req.amount_toman)} شارژ شد.',
+                        reply_markup=main_reply_keyboard(),
+                    )
+                except Exception:
+                    pass
+                req.notified_at = timezone.now()
+                req.save(update_fields=['notified_at', 'updated_at'])
+        except Exception:
+            pass
+        time.sleep(10)
 
 
 def process_queued_broadcasts(bot: TeleBot):
@@ -457,6 +501,7 @@ class Command(BaseCommand):
         except Exception:
             pass
         threading.Thread(target=process_queued_broadcasts, args=(bot,), daemon=True).start()
+        threading.Thread(target=notify_auto_approved_cards, args=(bot,), daemon=True).start()
 
         @bot.message_handler(commands=['start', 'menu'])
         def start(message):
@@ -546,19 +591,63 @@ class Command(BaseCommand):
                 return
 
             if state == 'awaiting_card_receipt':
-                amount = Decimal(user.temp_data.get('amount_toman') or 0)
-                receipt_text = message.text or message.caption or '[رسید تصویری/فایل]'
-                req = CardPaymentRequest.objects.create(user=user, amount_toman=amount, receipt_text=receipt_text)
+                req = CardPaymentRequest.objects.filter(
+                    pk=user.temp_data.get('card_request_id'), user=user
+                ).first()
+                if not req:
+                    reset_user_state(user)
+                    bot.send_message(
+                        message.chat.id,
+                        'این درخواست پیدا نشد. لطفاً دوباره از بخش کیف پول اقدام کنید.',
+                        reply_markup=main_reply_keyboard(),
+                    )
+                    return
+
+                req.receipt_text = message.text or message.caption or '[رسید تصویری]'
+                if message.photo:
+                    # Keep the largest size; file_id is enough to re-send it to the operator.
+                    req.receipt_file_id = message.photo[-1].file_id
+                elif message.document:
+                    req.receipt_file_id = message.document.file_id
+                req.save(update_fields=['receipt_text', 'receipt_file_id', 'updated_at'])
+
                 if site_now.support_chat_id:
+                    admin_text = (
+                        f'💳 رسید کارت‌به‌کارت #{req.pk}\n'
+                        f'Chat ID: <code>{user.chat_id}</code>\n'
+                        f'Username: @{user.username or "-"}\n'
+                        f'مبلغ دقیق: {toman(req.amount_toman)}\n'
+                        f'وضعیت: {"تاییدشده" if req.status == CardPaymentRequest.Status.APPROVED else "در انتظار"}'
+                        f'{" (منقضی)" if req.is_expired else ""}\n'
+                        f'رسید: {req.receipt_text}'
+                    )
                     try:
-                        bot.send_message(
-                            site_now.support_chat_id,
-                            f'💳 درخواست کارت‌به‌کارت جدید #{req.pk}\nChat ID: <code>{user.chat_id}</code>\nمبلغ: {toman(amount)}\nرسید: {receipt_text}',
-                        )
+                        if req.receipt_file_id:
+                            bot.send_photo(site_now.support_chat_id, req.receipt_file_id, caption=admin_text)
+                        else:
+                            bot.send_message(site_now.support_chat_id, admin_text)
                     except Exception:
                         pass
+
                 reset_user_state(user)
-                bot.send_message(message.chat.id, '✅ رسید شما ثبت شد. بعد از تایید مدیر، کیف پول شارژ می‌شود.', reply_markup=main_reply_keyboard())
+                req.refresh_from_db()
+                if req.status == CardPaymentRequest.Status.APPROVED:
+                    reply = (
+                        '✅ پرداخت شما قبلاً به‌صورت خودکار تایید و کیف پولتان شارژ شده است.\n'
+                        'رسید هم برای پشتیبانی ثبت شد.'
+                    )
+                elif req.is_expired:
+                    reply = (
+                        '⏱ مهلت این فاکتور تمام شده بود، اما رسید شما ثبت شد.\n'
+                        'پشتیبانی آن را بررسی و به‌صورت دستی تایید می‌کند.'
+                    )
+                else:
+                    reply = (
+                        '✅ رسید شما ثبت شد.\n'
+                        'اگر مبلغ دقیق را واریز کرده باشید، تا چند دقیقه دیگر خودکار تایید می‌شود؛ '
+                        'در غیر این صورت پشتیبانی بررسی می‌کند.'
+                    )
+                bot.send_message(message.chat.id, reply, reply_markup=main_reply_keyboard())
                 return
 
             send_main_menu(bot, message.chat.id)
@@ -672,10 +761,11 @@ class Command(BaseCommand):
                 if not site_now.card_to_card_enabled:
                     edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
                     return
+                req = create_card_request(user, amount)
                 user.state = 'awaiting_card_receipt'
-                user.temp_data = {'amount_toman': amount}
+                user.temp_data = {'card_request_id': req.pk}
                 user.save(update_fields=['state', 'temp_data', 'updated_at'])
-                edit_or_send(bot, call, f'{site_now.card_to_card_text}\n\nمبلغ: {toman(amount)}\nبعد از واریز، رسید یا شماره پیگیری را همینجا ارسال کنید.', cancel_keyboard())
+                edit_or_send(bot, call, card_invoice_text(site_now, req), cancel_keyboard())
                 return
 
             if data == 'services':

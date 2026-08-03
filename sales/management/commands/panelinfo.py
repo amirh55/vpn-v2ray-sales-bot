@@ -74,6 +74,11 @@ class Command(BaseCommand):
 
         webhook_url = f'{settings.PUBLIC_BASE_URL}/api/payments/oxapay/webhook/'
         self.stdout.write('  Webhook درگاه: ' + webhook_url)
+        if site and site.card_to_card_enabled and site.sms_webhook_secret:
+            self.stdout.write(
+                '  Webhook پیامک: '
+                f'{settings.PUBLIC_BASE_URL}/api/payments/sms/webhook/?secret={site.sms_webhook_secret}'
+            )
         self.stdout.write(f'  مسیر داده‌ها:  {settings.DATABASES["default"]["NAME"]}')
         self.stdout.write('')
 
