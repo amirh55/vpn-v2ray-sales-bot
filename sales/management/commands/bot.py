@@ -34,7 +34,7 @@ BTN_NEW = '🛒 خرید اشتراک جدید'
 BTN_RENEW = '🔁 تمدید اشتراک'
 BTN_WALLET = '💳 کیف پول + شارژ'
 BTN_SERVICES = '📦 سرویس‌های من'
-BTN_ADD = '➕ افزودن سرویس'
+BTN_ADD = '➕ افزودن اشتراک قدیمی'
 BTN_TUTORIAL = '📚 آموزش اتصال'
 BTN_CONTACT = '☎️ ارتباط با ما'
 BTN_CANCEL = 'لغو و بازگشت'
@@ -260,17 +260,37 @@ def show_new_services(bot: TeleBot, chat_id: int, call=None):
 
 
 def show_wallet(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
-    site_now = get_site()
+    """Step one of top-up: pick how much. The method is chosen next."""
     user.refresh_from_db()
     rows = [
         [('۱۰۰ هزار', 'topup:100000'), ('۵۰۰ هزار', 'topup:500000')],
         [('۱ میلیون', 'topup:1000000'), ('۲ میلیون', 'topup:2000000')],
-        [('مبلغ دلخواه', 'topup_custom')],
+        [('✏️ مبلغ دلخواه', 'topup_custom')],
+        [('بازگشت', 'cancel')],
     ]
+    send_or_edit(
+        bot,
+        chat_id,
+        f'💳 موجودی کیف پول شما: {toman(user.wallet_balance_toman)}\n\nمبلغ شارژ را انتخاب کنید:',
+        inline(rows),
+        call=call,
+    )
+
+
+def show_topup_methods(bot: TeleBot, chat_id: int, amount: int, call=None):
+    """Step two: pick how to pay the chosen amount."""
+    site_now = get_site()
+    rows = [[('🪙 پرداخت با کریپتو', f'payw:crypto:{amount}')]]
     if site_now.card_to_card_enabled:
-        rows.append([('کارت‌به‌کارت', 'card_amount')])
-    rows.append([('بازگشت', 'cancel')])
-    send_or_edit(bot, chat_id, f'💳 موجودی کیف پول شما: {toman(user.wallet_balance_toman)}\nمبلغ شارژ را انتخاب کنید:', inline(rows), call=call)
+        rows.append([('💳 کارت‌به‌کارت', f'payw:card:{amount}')])
+    rows.append([('بازگشت', 'wallet')])
+    send_or_edit(
+        bot,
+        chat_id,
+        f'مبلغ شارژ: <b>{toman(amount)}</b>\n\nروش پرداخت را انتخاب کنید:',
+        inline(rows),
+        call=call,
+    )
 
 
 def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
@@ -303,6 +323,42 @@ def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
 
     rows.append([('بازگشت', 'cancel')])
     send_or_edit(bot, chat_id, text, inline(rows), call=call)
+
+
+def operator_chat_ids() -> list[str]:
+    """Every chat that should receive operator alerts, without repeats."""
+    site = get_site()
+    ids = []
+    for value in (site.support_chat_id, site.admin_chat_id):
+        value = (value or '').strip()
+        if value and value not in ids:
+            ids.append(value)
+    return ids
+
+
+def notify_operator(bot: TeleBot, text: str, photo_file_id: str | None = None) -> None:
+    """Alert the shop owner in Telegram so the panel need not be watched.
+
+    Delivery failures are printed rather than swallowed: a wrong chat id is
+    otherwise invisible and the owner simply never hears about new messages.
+    """
+    targets = operator_chat_ids()
+    if not targets:
+        print(
+            'هشدار: «چت آیدی پشتیبانی» و «چت آیدی مدیر» هر دو خالی هستند، '
+            'پس اعلان پیام جدید برای شما ارسال نشد. '
+            'در ربات دستور /id را بزنید تا شناسه‌تان را ببینید و در پنل ثبت کنید.',
+            flush=True,
+        )
+        return
+    for chat_id in targets:
+        try:
+            if photo_file_id:
+                bot.send_photo(chat_id, photo_file_id, caption=text)
+            else:
+                bot.send_message(chat_id, text)
+        except Exception as exc:  # noqa: BLE001
+            print(f'ارسال اعلان به چت {chat_id} ناموفق بود: {exc}', flush=True)
 
 
 def card_details_text(site: SiteSetting) -> str:
@@ -555,7 +611,7 @@ class Command(BaseCommand):
                 types.BotCommand('new', 'خرید اشتراک جدید'),
                 types.BotCommand('wallet', 'کیف پول و شارژ'),
                 types.BotCommand('services', 'سرویس‌های من'),
-                types.BotCommand('addservice', 'افزودن سرویس با لینک کانفیگ'),
+                types.BotCommand('addservice', 'افزودن اشتراک قدیمی با لینک کانفیگ'),
                 types.BotCommand('renew', 'تمدید اشتراک'),
                 types.BotCommand('tutorial', 'آموزش اتصال'),
                 types.BotCommand('contact', 'ارتباط با ما'),
@@ -570,6 +626,18 @@ class Command(BaseCommand):
             user = ensure_user_from_message(message)
             reset_user_state(user)
             send_main_menu(bot, message.chat.id)
+
+        @bot.message_handler(commands=['id'])
+        def whoami(message):
+            # Setting up operator alerts needs this number, and there is no
+            # other way to find it from inside the bot.
+            bot.send_message(
+                message.chat.id,
+                'شناسه چت شما:\n'
+                f'<code>{message.chat.id}</code>\n\n'
+                'برای دریافت اعلان پیام‌های پشتیبانی، این عدد را در پنل، '
+                '«تنظیمات اصلی ربات» → «چت آیدی پشتیبانی» ثبت کنید.',
+            )
 
         @bot.message_handler(commands=['new', 'renew', 'wallet', 'services', 'addservice', 'tutorial', 'contact'])
         def command_router(message):
@@ -599,18 +667,15 @@ class Command(BaseCommand):
             if state == 'awaiting_contact':
                 text = message.text or message.caption or '[فایل/تصویر بدون متن]'
                 SupportMessage.objects.create(user=user, message_text=text, telegram_message_id=message.message_id)
-                if site_now.support_chat_id:
-                    admin_text = (
-                        '📩 پیام جدید پشتیبانی\n'
-                        f'Chat ID: <code>{user.chat_id}</code>\n'
-                        f'Username: @{user.username or "-"}\n'
-                        f'نام: {user.first_name} {user.last_name}\n\n'
-                        f'{text}'
-                    )
-                    try:
-                        bot.send_message(site_now.support_chat_id, admin_text)
-                    except Exception:
-                        pass
+                admin_text = (
+                    '📩 <b>پیام جدید پشتیبانی</b>\n\n'
+                    f'👤 نام: {user.first_name} {user.last_name}\n'
+                    f'🔖 Username: @{user.username or "-"}\n'
+                    f'🆔 Chat ID: <code>{user.chat_id}</code>\n\n'
+                    f'💬 {text}\n\n'
+                    'برای پاسخ، از پنل بخش «ارسال پیام گروهی/تکی» با همین Chat ID استفاده کنید.'
+                )
+                notify_operator(bot, admin_text, photo_file_id=message.photo[-1].file_id if message.photo else None)
                 reset_user_state(user)
                 bot.send_message(message.chat.id, '✅ پیام شما ارسال شد. پشتیبانی بررسی می‌کند.', reply_markup=main_reply_keyboard())
                 return
@@ -639,17 +704,10 @@ class Command(BaseCommand):
                 if amount < 10000:
                     bot.send_message(message.chat.id, 'مبلغ معتبر نیست. لطفاً مبلغ را به تومان وارد کنید. حداقل ۱۰,۰۰۰ تومان.')
                     return
-                try:
-                    payment = create_oxapay_payment(user, amount)
-                    bot.send_message(
-                        message.chat.id,
-                        f'✅ لینک پرداخت ساخته شد.\nمبلغ: {toman(amount)}\nمبلغ دلاری تقریبی: {usd(payment.amount_usd)}\n\n{payment.payment_url}',
-                        reply_markup=main_reply_keyboard(),
-                        disable_web_page_preview=True,
-                    )
-                except OxaPayError as exc:
-                    bot.send_message(message.chat.id, f'خطا در ساخت لینک پرداخت: {exc}', reply_markup=main_reply_keyboard())
+                # A custom amount lands on the same method chooser as the
+                # preset ones, so the two paths behave alike.
                 reset_user_state(user)
+                show_topup_methods(bot, message.chat.id, amount)
                 return
 
             if state == 'awaiting_card_receipt':
@@ -673,23 +731,17 @@ class Command(BaseCommand):
                     req.receipt_file_id = message.document.file_id
                 req.save(update_fields=['receipt_text', 'receipt_file_id', 'updated_at'])
 
-                if site_now.support_chat_id:
-                    admin_text = (
-                        f'💳 رسید کارت‌به‌کارت #{req.pk}\n'
-                        f'Chat ID: <code>{user.chat_id}</code>\n'
-                        f'Username: @{user.username or "-"}\n'
-                        f'مبلغ دقیق: {toman(req.amount_toman)}\n'
-                        f'وضعیت: {"تاییدشده" if req.status == CardPaymentRequest.Status.APPROVED else "در انتظار"}'
-                        f'{" (منقضی)" if req.is_expired else ""}\n'
-                        f'رسید: {req.receipt_text}'
-                    )
-                    try:
-                        if req.receipt_file_id:
-                            bot.send_photo(site_now.support_chat_id, req.receipt_file_id, caption=admin_text)
-                        else:
-                            bot.send_message(site_now.support_chat_id, admin_text)
-                    except Exception:
-                        pass
+                admin_text = (
+                    f'💳 <b>رسید کارت‌به‌کارت #{req.pk}</b>\n\n'
+                    f'👤 نام: {user.first_name} {user.last_name}\n'
+                    f'🔖 Username: @{user.username or "-"}\n'
+                    f'🆔 Chat ID: <code>{user.chat_id}</code>\n'
+                    f'💰 مبلغ دقیق: {toman(req.amount_toman)}\n'
+                    f'📌 وضعیت: {"تاییدشده" if req.status == CardPaymentRequest.Status.APPROVED else "در انتظار"}'
+                    f'{" (منقضی)" if req.is_expired else ""}\n\n'
+                    f'🧾 {req.receipt_text}'
+                )
+                notify_operator(bot, admin_text, photo_file_id=req.receipt_file_id or None)
 
                 reset_user_state(user)
                 req.refresh_from_db()
@@ -837,12 +889,7 @@ class Command(BaseCommand):
                 return
 
             if data.startswith('topup:'):
-                amount = int(data.split(':')[1])
-                try:
-                    payment = create_oxapay_payment(user, amount)
-                    edit_or_send(bot, call, f'✅ لینک پرداخت ساخته شد.\nمبلغ: {toman(amount)}\nمعادل دلاری: {usd(payment.amount_usd)}\n\n{payment.payment_url}', home_inline_keyboard())
-                except OxaPayError as exc:
-                    edit_or_send(bot, call, f'خطا در ساخت لینک پرداخت: {exc}', home_inline_keyboard())
+                show_topup_methods(bot, call.message.chat.id, int(data.split(':')[1]), call=call)
                 return
 
             if data == 'topup_custom':
@@ -852,24 +899,30 @@ class Command(BaseCommand):
                 edit_or_send(bot, call, 'مبلغ شارژ را به تومان وارد کنید. مثال: 250000', cancel_keyboard())
                 return
 
-            if data == 'card_amount':
-                if not site_now.card_to_card_enabled:
-                    edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
+            if data.startswith('payw:'):
+                _, method, raw_amount = data.split(':')
+                amount = int(raw_amount)
+                if method == 'card':
+                    if not site_now.card_to_card_enabled:
+                        edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
+                        return
+                    req = create_card_request(user, amount)
+                    user.state = 'awaiting_card_receipt'
+                    user.temp_data = {'card_request_id': req.pk}
+                    user.save(update_fields=['state', 'temp_data', 'updated_at'])
+                    edit_or_send(bot, call, card_invoice_text(site_now, req), cancel_keyboard())
                     return
-                rows = [[('۵۰۰ هزار', 'card:500000'), ('۱ میلیون', 'card:1000000')], [('۲ میلیون', 'card:2000000')], [('بازگشت', 'wallet')]]
-                edit_or_send(bot, call, 'مبلغ کارت‌به‌کارت را انتخاب کنید:', inline(rows))
-                return
-
-            if data.startswith('card:'):
-                amount = int(data.split(':')[1])
-                if not site_now.card_to_card_enabled:
-                    edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
-                    return
-                req = create_card_request(user, amount)
-                user.state = 'awaiting_card_receipt'
-                user.temp_data = {'card_request_id': req.pk}
-                user.save(update_fields=['state', 'temp_data', 'updated_at'])
-                edit_or_send(bot, call, card_invoice_text(site_now, req), cancel_keyboard())
+                try:
+                    payment = create_oxapay_payment(user, amount)
+                    edit_or_send(
+                        bot,
+                        call,
+                        f'✅ لینک پرداخت ساخته شد.\nمبلغ: {toman(amount)}\n'
+                        f'معادل دلاری: {usd(payment.amount_usd)}\n\n{payment.payment_url}',
+                        home_inline_keyboard(),
+                    )
+                except OxaPayError as exc:
+                    edit_or_send(bot, call, f'خطا در ساخت لینک پرداخت: {exc}', home_inline_keyboard())
                 return
 
             if data == 'services':
