@@ -1,0 +1,7 @@
+* text=auto eol=lf
+
+*.sh text eol=lf
+scripts/vpnshop text eol=lf
+*.py text eol=lf
+*.png binary
+*.jpg binary

@@ -22,6 +22,11 @@ DEBUG = os.getenv('DEBUG', '1') == '1'
 ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '127.0.0.1,localhost').split(',') if h.strip()]
 PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', 'http://127.0.0.1:8000').rstrip('/')
 
+# The admin panel lives on a secret, randomly generated path so it is not
+# discoverable by scanners hitting /admin/. Installer writes ADMIN_PATH to .env.
+_admin_path = os.getenv('ADMIN_PATH', 'admin').strip().strip('/')
+ADMIN_PATH = f'{_admin_path}/' if _admin_path else 'admin/'
+
 INSTALLED_APPS = [
     'unfold',
     'django.contrib.admin',
@@ -90,7 +95,7 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = Path(os.getenv('MEDIA_ROOT', str(RUNTIME_DIR / 'media')))
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-LOGIN_REDIRECT_URL = '/admin/'
+LOGIN_REDIRECT_URL = f'/{ADMIN_PATH}'
 _csrf_public = os.getenv('PUBLIC_BASE_URL')
 CSRF_TRUSTED_ORIGINS = [u for u in [_csrf_public] if u and u.startswith('http')]
 

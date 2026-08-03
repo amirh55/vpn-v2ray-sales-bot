@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# vpnshop - ابزار مدیریت ربات فروش VPN روی سرور
+# نصب می‌شود در /usr/local/bin/vpnshop توسط scripts/install.sh
+set -euo pipefail
+
+CLI_CONF="${VPNSHOP_CLI_CONF:-/etc/vpnshop/cli.conf}"
+APP_DIR="${VPNSHOP_APP_DIR:-/opt/vpnshop}"
+RUNTIME_DIR="${VPNSHOP_RUNTIME_DIR:-/var/lib/vpnshop}"
+ENV_FILE="${VPNSHOP_ENV_FILE:-/etc/vpnshop/vpnshop.env}"
+
+if [ -f "$CLI_CONF" ]; then
+  # shellcheck disable=SC1090
+  source "$CLI_CONF"
+fi
+
+PY="$APP_DIR/.venv/bin/python"
+WEB_SERVICE="vpnshop-web"
+BOT_SERVICE="vpnshop-bot"
+
+red() { printf '\033[0;31m%s\033[0m\n' "$*"; }
+green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
+yellow() { printf '\033[0;33m%s\033[0m\n' "$*"; }
+
+die() { red "خطا: $*"; exit 1; }
+
+need_root() {
+  [ "$(id -u)" -eq 0 ] || die "این دستور باید با کاربر root اجرا شود."
+}
+
+check_install() {
+  [ -x "$PY" ] || die "نصب پیدا نشد در $APP_DIR . اول اسکریپت نصب را اجرا کنید."
+}
+
+manage() {
+  check_install
+  (cd "$APP_DIR" && VPNSHOP_RUNTIME_DIR="$RUNTIME_DIR" PYTHONIOENCODING=utf-8 "$PY" manage.py "$@")
+}
+
+# مقدار یک کلید را در فایل env جایگزین یا اضافه می‌کند
+set_env_value() {
+  local key="$1" value="$2"
+  need_root
+  mkdir -p "$(dirname "$ENV_FILE")"
+  touch "$ENV_FILE"
+  if grep -q "^${key}=" "$ENV_FILE"; then
+    local tmp
+    tmp="$(mktemp)"
+    grep -v "^${key}=" "$ENV_FILE" > "$tmp"
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    cat "$tmp" > "$ENV_FILE"
+    rm -f "$tmp"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+  fi
+  chmod 600 "$ENV_FILE"
+}
+
+random_path() {
+  python3 -c "import secrets,string;print(''.join(secrets.choice(string.ascii_lowercase+string.digits) for _ in range(20)))"
+}
+
+cmd_info() {
+  manage panelinfo
+  echo ""
+  echo "  وضعیت سرویس‌ها:"
+  for svc in "$WEB_SERVICE" "$BOT_SERVICE"; do
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      green "    $svc: در حال اجرا"
+    else
+      red "    $svc: متوقف است  (اجرا: vpnshop restart)"
+    fi
+  done
+  echo ""
+}
+
+cmd_status() {
+  systemctl status "$WEB_SERVICE" "$BOT_SERVICE" --no-pager || true
+}
+
+cmd_start() {
+  need_root
+  systemctl start "$WEB_SERVICE" "$BOT_SERVICE"
+  green "سرویس‌ها اجرا شدند."
+}
+
+cmd_stop() {
+  need_root
+  systemctl stop "$WEB_SERVICE" "$BOT_SERVICE"
+  yellow "سرویس‌ها متوقف شدند."
+}
+
+cmd_restart() {
+  need_root
+  systemctl restart "$WEB_SERVICE" "$BOT_SERVICE"
+  green "سرویس‌ها ری‌استارت شدند."
+}
+
+cmd_logs() {
+  local target="${1:-}"
+  case "$target" in
+    bot) journalctl -u "$BOT_SERVICE" -n 200 -f ;;
+    web|panel) journalctl -u "$WEB_SERVICE" -n 200 -f ;;
+    *) journalctl -u "$WEB_SERVICE" -u "$BOT_SERVICE" -n 200 -f ;;
+  esac
+}
+
+cmd_update() {
+  need_root
+  check_install
+  yellow "در حال دریافت آخرین نسخه..."
+  (cd "$APP_DIR" && git pull --ff-only)
+  (cd "$APP_DIR" && .venv/bin/pip install -r requirements.txt -q)
+  manage migrate --noinput
+  manage collectstatic --noinput
+  systemctl restart "$WEB_SERVICE" "$BOT_SERVICE"
+  green "به‌روزرسانی انجام شد."
+}
+
+cmd_newpath() {
+  need_root
+  local new_path
+  new_path="$(random_path)"
+  set_env_value ADMIN_PATH "$new_path"
+  systemctl restart "$WEB_SERVICE"
+  green "مسیر جدید پنل ساخته شد."
+  manage panelinfo --url-only
+}
+
+cmd_passwd() {
+  local username="${1:-}"
+  [ -n "$username" ] || die "نام کاربری را وارد کنید:  vpnshop passwd <username>"
+  manage changepassword "$username"
+}
+
+cmd_adduser() {
+  manage createsuperuser
+}
+
+cmd_help() {
+  cat <<'EOF'
+vpnshop - مدیریت ربات فروش VPN
+
+استفاده:
+  vpnshop info              نمایش آدرس پنل، کاربران مدیر و وضعیت سرویس‌ها
+  vpnshop status            وضعیت کامل سرویس‌های systemd
+  vpnshop start             اجرای پنل و ربات
+  vpnshop stop              توقف پنل و ربات
+  vpnshop restart           ری‌استارت پنل و ربات
+  vpnshop logs [web|bot]    نمایش زنده لاگ‌ها
+  vpnshop update            دریافت آخرین نسخه از گیت‌هاب و ری‌استارت
+  vpnshop newpath           ساخت مسیر مخفی جدید برای پنل
+  vpnshop passwd <user>     تغییر رمز عبور یک کاربر مدیر
+  vpnshop adduser           ساخت کاربر مدیر جدید
+EOF
+}
+
+main() {
+  local cmd="${1:-info}"
+  shift || true
+  case "$cmd" in
+    info) cmd_info "$@" ;;
+    status) cmd_status "$@" ;;
+    start) cmd_start "$@" ;;
+    stop) cmd_stop "$@" ;;
+    restart) cmd_restart "$@" ;;
+    logs) cmd_logs "$@" ;;
+    update) cmd_update "$@" ;;
+    newpath) cmd_newpath "$@" ;;
+    passwd) cmd_passwd "$@" ;;
+    adduser) cmd_adduser "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *) red "دستور ناشناخته: $cmd"; echo ""; cmd_help; exit 1 ;;
+  esac
+}
+
+main "$@"

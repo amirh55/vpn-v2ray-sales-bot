@@ -1,5 +1,11 @@
 # ربات فروش کانفیگ V2Ray / 3x-ui + پنل مدیریت Django
 
+نصب روی سرور فقط با یک دستور:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/amirh55/vpn-v2ray-sales-bot/main/scripts/install.sh)
+```
+
 این پروژه یک نسخه پایه عملیاتی برای فروش اشتراک VPN/V2Ray است و شامل این بخش‌هاست:
 
 - ربات تلگرام با منوی فارسی
@@ -9,7 +15,10 @@
 - سرویس‌های من و ارسال مجدد لینک‌ها
 - آموزش اتصال
 - ارتباط با پشتیبانی بدون نمایش اطلاعات مدیر به کاربر
+- نصب یک‌دستوری روی سرور به‌همراه سرویس‌های systemd و ری‌استارت خودکار
 - پنل مدیریت گرافیکی و مدرن (django-unfold) با داشبورد آماری برای تنظیم ربات، OxaPay، پنل 3x-ui، سرویس‌ها و پلن‌ها
+- آدرس پنل روی یک مسیر مخفی تصادفی، برای امنیت بیشتر
+- دستور `vpnshop` برای مدیریت سرور و پیدا کردن دوباره آدرس پنل
 - قیمت‌گذاری دلاری با تبدیل خودکار به تومان بر اساس نرخ دلار قابل تنظیم در پنل
 - اتصال به 3x-ui با API Token و انتخاب Inbound برای هر سرویس
 - ارسال لینک کانفیگ، لینک Subscription و QR Code
@@ -18,45 +27,105 @@
 
 ---
 
-## 1) نصب سریع روی سرور یا مک
+## 1) نصب روی سرور با یک دستور
+
+روی سرور اوبونتو/دبیان (یا CentOS/Rocky) به‌عنوان `root` فقط همین یک خط را بزنید:
 
 ```bash
-cd vpn_v2ray_sales_bot
+bash <(curl -fsSL https://raw.githubusercontent.com/amirh55/vpn-v2ray-sales-bot/main/scripts/install.sh)
+```
+
+این اسکریپت خودش همه کارها را انجام می‌دهد:
+
+- نصب پیش‌نیازها (python، git، pip)
+- دریافت سورس در `/opt/vpnshop` و ساخت محیط مجازی
+- ساخت `SECRET_KEY` و یک **مسیر مخفی تصادفی** برای پنل
+- اجرای migrate و collectstatic
+- ساخت کاربر مدیر با رمز تصادفی و نمایش آن در پایان
+- ساخت سرویس‌های systemd برای پنل و ربات با **ری‌استارت خودکار** و بالا آمدن بعد از ریبوت سرور
+- نصب دستور مدیریتی `vpnshop`
+- باز کردن پورت در فایروال در صورت فعال بودن ufw
+
+در پایان نصب، آدرس پنل و نام کاربری و رمز عبور نمایش داده می‌شود.
+
+### نصب همراه با دامنه و HTTPS رایگان
+
+اگر دامنه دارید و آن را به IP سرور وصل کرده‌اید، به‌جای دستور بالا این را بزنید تا Nginx و گواهی SSL هم خودکار نصب شود:
+
+```bash
+DOMAIN=shop.example.com bash <(curl -fsSL https://raw.githubusercontent.com/amirh55/vpn-v2ray-sales-bot/main/scripts/install.sh)
+```
+
+این حالت توصیه می‌شود، چون هم پنل روی HTTPS امن می‌شود و هم Webhook درگاه OxaPay بدون HTTPS کار نمی‌کند.
+
+---
+
+## 1-1) دستور مدیریتی `vpnshop`
+
+بعد از نصب، این دستور روی سرور در دسترس است:
+
+```bash
+vpnshop info              # آدرس پنل، کاربران مدیر و وضعیت سرویس‌ها
+vpnshop status            # وضعیت کامل سرویس‌ها
+vpnshop restart           # ری‌استارت پنل و ربات
+vpnshop logs bot          # دیدن زنده لاگ ربات
+vpnshop logs web          # دیدن زنده لاگ پنل
+vpnshop update            # دریافت آخرین نسخه از گیت‌هاب و ری‌استارت
+vpnshop newpath           # ساخت مسیر مخفی جدید برای پنل
+vpnshop passwd admin      # تغییر رمز عبور کاربر مدیر
+vpnshop adduser           # ساخت کاربر مدیر جدید
+```
+
+**اگر آدرس پنل را گم کردید**، کافی است روی سرور بزنید:
+
+```bash
+vpnshop info
+```
+
+---
+
+## 1-2) مسیر مخفی پنل
+
+پنل مدیریت روی `/admin/` نیست. هنگام نصب یک مسیر تصادفی ۲۰ کاراکتری ساخته می‌شود، مثلا:
+
+```text
+https://shop.example.com/k7x2mq9vbn4tz8sw1p3d/
+```
+
+به این ترتیب اسکنرهایی که آدرس `/admin/` را تست می‌کنند به صفحه ورود نمی‌رسند و فقط خطای 404 می‌گیرند.
+
+- مسیر فعلی در فایل `/etc/vpnshop/vpnshop.env` با کلید `ADMIN_PATH` ذخیره می‌شود.
+- برای عوض کردن مسیر: `vpnshop newpath`
+- نکته امنیتی: مسیر مخفی وقتی واقعا ارزش دارد که پنل روی HTTPS باشد، وگرنه آدرس در مسیر شبکه قابل دیدن است. پس حتما نصب با `DOMAIN=` را انجام دهید.
+
+---
+
+## 1-3) نصب دستی (اختیاری، برای توسعه روی مک یا لوکال)
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env
 python manage.py migrate
+python manage.py collectstatic --noinput
 python manage.py createsuperuser
 python manage.py runserver 0.0.0.0:8000
 ```
 
-پنل مدیریت (با تم گرافیکی جدید django-unfold، شامل داشبورد آماری و سایدبار دسته‌بندی‌شده):
-
-```text
-http://YOUR_SERVER:8000/admin/
-```
-
-نکته: چون یک اپ استاتیک جدید (`unfold`) اضافه شده، بعد از `pip install -r requirements.txt` یک بار هم این دستور را اجرا کنید تا فایل‌های استاتیک تم جمع‌آوری شوند:
-
-```bash
-python manage.py collectstatic --noinput
-```
-
-برای اجرای ربات در یک ترمینال جدا:
+ربات در یک ترمینال جدا:
 
 ```bash
 source .venv/bin/activate
 python manage.py bot
 ```
 
-در سرور واقعی بهتر است `runserver` استفاده نشود و پروژه با `gunicorn + nginx + systemd` اجرا شود.
+در حالت دستی اگر `ADMIN_PATH` را ست نکنید، پنل روی همان `/admin/` بالا می‌آید.
 
 ---
 
 ## 2) تنظیمات اصلی در پنل
 
-بعد از ورود به `/admin/`:
+بعد از ورود به پنل (آدرس را با `vpnshop info` ببینید):
 
 1. وارد بخش **تنظیمات اصلی ربات** شوید.
 2. این موارد را وارد کنید:
@@ -237,36 +306,46 @@ vless://{uuid}@your-domain.com:443?type=tcp&security=reality&fp=chrome&sni=googl
 
 ---
 
-## 10) اجرای دائمی روی سرور با systemd، نمونه ساده
+## 10) اجرای دائمی روی سرور
 
-فایل سرویس ربات:
+اگر با اسکریپت نصب (بخش ۱) نصب کرده باشید، این کار **خودکار انجام شده است**. دو سرویس systemd ساخته می‌شود:
 
-```ini
-[Unit]
-Description=VPN Sales Telegram Bot
-After=network.target
+- `vpnshop-web` : پنل مدیریت با gunicorn
+- `vpnshop-bot` : ربات تلگرام
 
-[Service]
-WorkingDirectory=/opt/vpn_v2ray_sales_bot
-ExecStart=/opt/vpn_v2ray_sales_bot/.venv/bin/python manage.py bot
-Restart=always
-User=www-data
-Environment=PYTHONUNBUFFERED=1
+هر دو با `Restart=always` اجرا می‌شوند، یعنی اگر کرش کنند خودکار بالا می‌آیند و بعد از ریبوت سرور هم خودشان روشن می‌شوند.
 
-[Install]
-WantedBy=multi-user.target
+```bash
+vpnshop status      # وضعیت
+vpnshop restart     # ری‌استارت
+vpnshop logs        # لاگ زنده هر دو سرویس
 ```
 
-فایل سرویس وب بهتر است با gunicorn اجرا شود.
+یا مستقیم با systemd:
+
+```bash
+systemctl status vpnshop-web vpnshop-bot
+journalctl -u vpnshop-bot -f
+```
+
+### به‌روزرسانی به آخرین نسخه
+
+```bash
+vpnshop update
+```
+
+این دستور آخرین تغییرات را از گیت‌هاب می‌گیرد، کتابخانه‌ها را نصب می‌کند، migrate و collectstatic می‌زند و سرویس‌ها را ری‌استارت می‌کند.
 
 ---
 
 ## 11) نکات امنیتی مهم
 
-- از HTTPS استفاده کنید؛ OxaPay برای Webhook روی localhost کار عملیاتی ندارد.
-- `SECRET_KEY` و API Token ها را عمومی نکنید.
+- از HTTPS استفاده کنید؛ OxaPay برای Webhook روی localhost کار عملیاتی ندارد. ساده‌ترین راه، نصب با `DOMAIN=` است.
+- آدرس پنل روی یک مسیر مخفی تصادفی است، ولی این جایگزین رمز قوی نیست. حتما رمز کاربر مدیر را عوض کنید: `vpnshop passwd admin`
+- اگر فکر می‌کنید مسیر پنل لو رفته: `vpnshop newpath`
+- `SECRET_KEY` و API Token ها را عمومی نکنید. همه در `/etc/vpnshop/vpnshop.env` با دسترسی `600` ذخیره می‌شوند.
 - فایل دیتابیس SQLite برای شروع مناسب است؛ برای فروش واقعی بهتر است PostgreSQL استفاده شود.
-- پنل Django را پشت رمز قوی و ترجیحاً IP Whitelist قرار دهید.
+- سرویس‌ها با کاربر root اجرا می‌شوند تا نصب ساده بماند. اگر حساسیت امنیتی بالایی دارید، سرور را فقط برای همین پنل استفاده کنید و دسترسی SSH را محدود کنید.
 - در صورت فعال کردن کارت‌به‌کارت، هر متنی که در `card_to_card_text` بنویسید به کاربر نمایش داده می‌شود.
 - استفاده از VPN/V2Ray باید مطابق قوانین محل فعالیت شما باشد.
 
@@ -282,8 +361,11 @@ sales/services/oxapay.py               اتصال به OxaPay
 sales/services/xui.py                  اتصال به 3x-ui
 sales/services/provisioning.py         ساخت و تمدید سرویس
 sales/views.py                         Webhook پرداخت
-vpnshop/settings.py                    تنظیمات UNFOLD (رنگ، سایدبار، برندینگ پنل)
+vpnshop/settings.py                    تنظیمات UNFOLD و ADMIN_PATH
 templates/admin/index.html             کارت‌های داشبورد آماری پنل مدیریت
+scripts/install.sh                     نصب یک‌دستوری روی سرور
+scripts/vpnshop                        دستور مدیریتی سرور
+sales/management/commands/panelinfo.py نمایش آدرس و اطلاعات پنل
 ```
 
 ---
