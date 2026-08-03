@@ -137,6 +137,10 @@ cmd_adduser() {
   manage createsuperuser
 }
 
+cmd_oxapay() {
+  manage oxapay_check "$@"
+}
+
 cmd_help() {
   cat <<'EOF'
 vpnshop - مدیریت ربات فروش VPN
@@ -152,6 +156,7 @@ vpnshop - مدیریت ربات فروش VPN
   vpnshop newpath           ساخت مسیر مخفی جدید برای پنل
   vpnshop passwd <user>     تغییر رمز عبور یک کاربر مدیر
   vpnshop adduser           ساخت کاربر مدیر جدید
+  vpnshop oxapay            تست کلید درگاه OxaPay و نمایش پاسخ واقعی درگاه
 EOF
 }
 
@@ -169,6 +174,7 @@ main() {
     newpath) cmd_newpath "$@" ;;
     passwd) cmd_passwd "$@" ;;
     adduser) cmd_adduser "$@" ;;
+    oxapay) cmd_oxapay "$@" ;;
     help|-h|--help) cmd_help ;;
     *) red "دستور ناشناخته: $cmd"; echo ""; cmd_help; exit 1 ;;
   esac

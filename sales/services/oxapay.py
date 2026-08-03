@@ -23,9 +23,20 @@ def toman_to_usd(amount_toman: Decimal, dollar_rate_toman: Decimal) -> Decimal:
     return (Decimal(amount_toman) / Decimal(dollar_rate_toman)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def get_merchant_key() -> str:
+    """Return the configured merchant key, without stray whitespace.
+
+    A key pasted with a trailing space or newline is rejected as 401, which
+    reads exactly like a wrong key and wastes a lot of debugging time.
+    """
+    site = SiteSetting.get_solo()
+    return (site.oxapay_merchant_api_key or '').strip()
+
+
 def create_invoice(payment: Payment) -> Payment:
     site = SiteSetting.get_solo()
-    if not site.oxapay_merchant_api_key:
+    merchant_key = get_merchant_key()
+    if not merchant_key:
         raise OxaPayError('کلید API درگاه OxaPay در تنظیمات ثبت نشده است.')
 
     callback_url = f'{django_settings.PUBLIC_BASE_URL}/api/payments/oxapay/webhook/'
@@ -40,7 +51,7 @@ def create_invoice(payment: Payment) -> Payment:
         'sandbox': bool(site.oxapay_sandbox),
     }
     headers = {
-        'merchant_api_key': site.oxapay_merchant_api_key,
+        'merchant_api_key': merchant_key,
         'Content-Type': 'application/json',
     }
     try:
