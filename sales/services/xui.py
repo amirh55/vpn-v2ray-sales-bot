@@ -130,6 +130,90 @@ class XUIClient:
                 last_error = exc
         raise XUIError(str(last_error))
 
+    @staticmethod
+    def _as_list(value: Any) -> list[dict[str, Any]]:
+        """Unwrap the several shapes 3x-ui uses for list payloads."""
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        if isinstance(value, dict):
+            for key in ('obj', 'data', 'result', 'inbounds'):
+                inner = value.get(key)
+                if inner is not None and inner is not value:
+                    found = XUIClient._as_list(inner)
+                    if found:
+                        return found
+        return []
+
+    @staticmethod
+    def _inbound_clients(inbound: dict[str, Any]) -> list[dict[str, Any]]:
+        """Read the client list out of an inbound's settings.
+
+        3x-ui stores settings as a JSON *string* on the inbound row, though
+        some builds return it already decoded.
+        """
+        settings = inbound.get('settings')
+        if isinstance(settings, str):
+            try:
+                settings = json.loads(settings)
+            except ValueError:
+                return []
+        if not isinstance(settings, dict):
+            return []
+        clients = settings.get('clients')
+        return [c for c in clients if isinstance(c, dict)] if isinstance(clients, list) else []
+
+    @staticmethod
+    def _client_identifier(client: dict[str, Any]) -> str:
+        """The value that also appears in the user's share link.
+
+        vless/vmess use `id`; trojan and shadowsocks use `password`.
+        """
+        for key in ('id', 'password'):
+            value = str(client.get(key) or '').strip()
+            if value:
+                return value
+        return ''
+
+    def find_client_by_identifier(self, identifier: str) -> dict[str, Any] | None:
+        """Locate a client across every inbound by its link identifier.
+
+        Returns the client row, its inbound and live traffic counters, or None
+        when this panel does not hold that config.
+        """
+        wanted = (identifier or '').strip().lower()
+        if not wanted:
+            return None
+
+        inbounds = self._as_list(self.list_inbounds())
+        for inbound in inbounds:
+            for client in self._inbound_clients(inbound):
+                if self._client_identifier(client).lower() != wanted:
+                    continue
+
+                email = str(client.get('email') or '').strip()
+                stats = {}
+                for row in inbound.get('clientStats') or []:
+                    if isinstance(row, dict) and str(row.get('email') or '').strip() == email:
+                        stats = row
+                        break
+
+                # Limits live on the client row, usage on the stats row, but
+                # some builds duplicate both. Prefer whichever is populated.
+                total = int(stats.get('total') or client.get('totalGB') or 0)
+                expiry = int(stats.get('expiryTime') or client.get('expiryTime') or 0)
+                return {
+                    'inbound_id': int(inbound.get('id') or 0),
+                    'inbound_remark': str(inbound.get('remark') or ''),
+                    'email': email,
+                    'identifier': self._client_identifier(client),
+                    'up': int(stats.get('up') or 0),
+                    'down': int(stats.get('down') or 0),
+                    'total': total,
+                    'expiry_time': expiry,
+                    'enable': bool(stats.get('enable', client.get('enable', True))),
+                }
+        return None
+
     def _client_v3_payloads(self, inbound_id: int, client_payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Return payloads for current 3x-ui 3.x Clients API.
 

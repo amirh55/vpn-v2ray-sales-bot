@@ -281,6 +281,38 @@ class CardPaymentRequest(TimeStampedModel):
         return f'{self.user.chat_id} {self.amount_toman} {self.status}'
 
 
+class LinkedService(TimeStampedModel):
+    """A config the user bought elsewhere, matched to a panel client by UUID.
+
+    Orders cover subscriptions sold by this bot. This model covers configs the
+    user already owns, so they can watch remaining traffic and time here
+    without buying again. Usage is always read live from the panel; nothing
+    about consumption is cached on this row.
+    """
+
+    user = models.ForeignKey(TelegramUser, verbose_name='کاربر', on_delete=models.CASCADE, related_name='linked_services')
+    panel = models.ForeignKey(XUIPanel, verbose_name='پنل 3x-ui', on_delete=models.CASCADE)
+    client_uuid = models.CharField('شناسه کلاینت / UUID', max_length=120)
+    client_email = models.CharField('Email/شناسه کلاینت در پنل', max_length=150, blank=True)
+    inbound_id = models.PositiveIntegerField('شناسه Inbound', default=0)
+    label = models.CharField('نام دلخواه', max_length=150, blank=True)
+    config_link = models.TextField('لینک کانفیگ ارسالی کاربر', blank=True)
+
+    class Meta:
+        verbose_name = 'سرویس افزوده‌شده کاربر'
+        verbose_name_plural = 'سرویس‌های افزوده‌شده کاربران'
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'client_uuid'], name='unique_user_linked_client'),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.user.chat_id} {self.client_email or self.client_uuid}'
+
+    def display_name(self) -> str:
+        return self.label or self.client_email or self.client_uuid[:12]
+
+
 class Broadcast(TimeStampedModel):
     class Status(models.TextChoices):
         DRAFT = 'draft', 'پیش‌نویس'

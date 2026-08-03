@@ -14,6 +14,7 @@ from telebot import TeleBot, types
 from sales.models import (
     Broadcast,
     CardPaymentRequest,
+    LinkedService,
     Order,
     Payment,
     Plan,
@@ -23,6 +24,7 @@ from sales.models import (
     TelegramUser,
     WalletTransaction,
 )
+from sales.services.linking import LinkingError, link_config, refresh_usage, usage_text
 from sales.services.formatting import days_text, fa_digits, parse_toman, toman, traffic_text, usd
 from sales.services.oxapay import OxaPayError, create_invoice, toman_to_usd
 from sales.services.provisioning import create_order_from_wallet, provision_order, renew_order_from_wallet
@@ -31,6 +33,7 @@ BTN_NEW = '🛒 خرید اشتراک جدید'
 BTN_RENEW = '🔁 تمدید اشتراک'
 BTN_WALLET = '💳 کیف پول + شارژ'
 BTN_SERVICES = '📦 سرویس‌های من'
+BTN_ADD = '➕ افزودن سرویس'
 BTN_TUTORIAL = '📚 آموزش اتصال'
 BTN_CONTACT = '☎️ ارتباط با ما'
 BTN_CANCEL = 'لغو و بازگشت'
@@ -40,12 +43,14 @@ MAIN_TEXT_ACTIONS = {
     BTN_RENEW: 'renew',
     BTN_WALLET: 'wallet',
     BTN_SERVICES: 'services',
+    BTN_ADD: 'addservice',
     BTN_TUTORIAL: 'tutorial',
     BTN_CONTACT: 'contact',
     '/new': 'new',
     '/renew': 'renew',
     '/wallet': 'wallet',
     '/services': 'services',
+    '/addservice': 'addservice',
     '/tutorial': 'tutorial',
     '/contact': 'contact',
 }
@@ -77,8 +82,8 @@ def main_reply_keyboard() -> types.ReplyKeyboardMarkup:
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
     kb.row(BTN_NEW)
     kb.row(BTN_RENEW, BTN_WALLET)
-    kb.row(BTN_SERVICES, BTN_TUTORIAL)
-    kb.row(BTN_CONTACT)
+    kb.row(BTN_SERVICES, BTN_ADD)
+    kb.row(BTN_TUTORIAL, BTN_CONTACT)
     return kb
 
 
@@ -241,17 +246,67 @@ def show_wallet(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
 
 def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
     orders = Order.objects.filter(user=user, status=Order.Status.PROVISIONED).select_related('plan', 'service').order_by('-created_at')[:10]
-    if not orders:
-        send_or_edit(bot, chat_id, 'هنوز سرویس فعالی ندارید.', home_inline_keyboard(), call=call)
+    linked = LinkedService.objects.filter(user=user).select_related('panel').order_by('-created_at')[:10]
+    if not orders and not linked:
+        send_or_edit(
+            bot,
+            chat_id,
+            'هنوز سرویسی ندارید.\n\n'
+            f'اگر کانفیگی دارید که از جای دیگری تهیه کرده‌اید، با «{BTN_ADD}» می‌توانید آن را اینجا اضافه کنید '
+            'و حجم و زمان باقی‌مانده‌اش را ببینید.',
+            home_inline_keyboard(),
+            call=call,
+        )
         return
+
     rows = []
     text = '📦 سرویس‌های شما:\n\n'
     for o in orders:
         exp = fa_digits(timezone.localtime(o.expires_at).strftime('%Y-%m-%d')) if o.expires_at else 'بدون تاریخ'
         text += f'#{fa_digits(o.pk)} - {o.service.name} / {o.plan.name} / انقضا: {exp}\n'
         rows.append([(f'ارسال مجدد لینک #{o.pk}', f'resend:{o.pk}')])
+
+    if linked:
+        text += '\n➕ سرویس‌های افزوده‌شده:\n'
+        for item in linked:
+            text += f'• {item.display_name()}\n'
+            rows.append([(f'📊 مصرف {item.display_name()}', f'lusage:{item.pk}')])
+
     rows.append([('بازگشت', 'cancel')])
     send_or_edit(bot, chat_id, text, inline(rows), call=call)
+
+
+def prompt_add_service(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
+    user.state = 'awaiting_config_link'
+    user.save(update_fields=['state', 'updated_at'])
+    send_or_edit(
+        bot,
+        chat_id,
+        '🔗 لینک کانفیگ خود را ارسال نمایید.\n\n'
+        'لینکی که با <code>vless://</code> یا <code>vmess://</code> یا <code>trojan://</code> شروع می‌شود را '
+        'کامل کپی کنید و همین‌جا بفرستید.\n\n'
+        'اگر این کانفیگ روی سرورهای ما باشد، به حساب شما اضافه می‌شود و می‌توانید حجم و زمان باقی‌مانده را ببینید.',
+        cancel_keyboard(),
+        call=call,
+    )
+
+
+def show_linked_usage(bot: TeleBot, user: TelegramUser, chat_id: int, linked_id: int, call=None):
+    linked = LinkedService.objects.filter(pk=linked_id, user=user).select_related('panel').first()
+    if not linked:
+        send_or_edit(bot, chat_id, 'این سرویس پیدا نشد.', home_inline_keyboard(), call=call)
+        return
+    try:
+        info = refresh_usage(linked)
+    except LinkingError as exc:
+        send_or_edit(bot, chat_id, f'⚠️ {exc}', home_inline_keyboard(), call=call)
+        return
+    rows = [
+        [('🔄 بروزرسانی', f'lusage:{linked.pk}')],
+        [('🗑 حذف این سرویس', f'ldel:{linked.pk}')],
+        [('بازگشت', 'services')],
+    ]
+    send_or_edit(bot, chat_id, usage_text(info, linked.display_name()), inline(rows), call=call)
 
 
 def show_renew(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
@@ -288,6 +343,8 @@ def route_main_action(bot: TeleBot, user: TelegramUser, chat_id: int, action: st
         show_wallet(bot, user, chat_id)
     elif action == 'services':
         show_my_services(bot, user, chat_id)
+    elif action == 'addservice':
+        prompt_add_service(bot, user, chat_id)
     elif action == 'renew':
         show_renew(bot, user, chat_id)
     elif action == 'tutorial':
@@ -392,6 +449,7 @@ class Command(BaseCommand):
                 types.BotCommand('new', 'خرید اشتراک جدید'),
                 types.BotCommand('wallet', 'کیف پول و شارژ'),
                 types.BotCommand('services', 'سرویس‌های من'),
+                types.BotCommand('addservice', 'افزودن سرویس با لینک کانفیگ'),
                 types.BotCommand('renew', 'تمدید اشتراک'),
                 types.BotCommand('tutorial', 'آموزش اتصال'),
                 types.BotCommand('contact', 'ارتباط با ما'),
@@ -406,7 +464,7 @@ class Command(BaseCommand):
             reset_user_state(user)
             send_main_menu(bot, message.chat.id)
 
-        @bot.message_handler(commands=['new', 'renew', 'wallet', 'services', 'tutorial', 'contact'])
+        @bot.message_handler(commands=['new', 'renew', 'wallet', 'services', 'addservice', 'tutorial', 'contact'])
         def command_router(message):
             user = ensure_user_from_message(message)
             reset_user_state(user)
@@ -448,6 +506,25 @@ class Command(BaseCommand):
                         pass
                 reset_user_state(user)
                 bot.send_message(message.chat.id, '✅ پیام شما ارسال شد. پشتیبانی بررسی می‌کند.', reply_markup=main_reply_keyboard())
+                return
+
+            if state == 'awaiting_config_link':
+                raw_link = (message.text or message.caption or '').strip()
+                try:
+                    linked, info = link_config(user, raw_link)
+                except LinkingError as exc:
+                    bot.send_message(
+                        message.chat.id,
+                        f'⚠️ {exc}\n\nدوباره لینک را بفرستید یا «{BTN_CANCEL}» را بزنید.',
+                        reply_markup=cancel_keyboard(),
+                    )
+                    return
+                reset_user_state(user)
+                bot.send_message(
+                    message.chat.id,
+                    '✅ سرویس شما با موفقیت اضافه شد.\n\n' + usage_text(info, linked.display_name()),
+                    reply_markup=main_reply_keyboard(),
+                )
                 return
 
             if state == 'awaiting_custom_topup':
@@ -608,6 +685,19 @@ class Command(BaseCommand):
             if data.startswith('resend:'):
                 order = Order.objects.select_related('plan', 'service').get(pk=int(data.split(':')[1]), user=user)
                 send_delivery(bot, call.message.chat.id, order)
+                return
+
+            if data == 'addservice':
+                prompt_add_service(bot, user, call.message.chat.id, call=call)
+                return
+
+            if data.startswith('lusage:'):
+                show_linked_usage(bot, user, call.message.chat.id, int(data.split(':')[1]), call=call)
+                return
+
+            if data.startswith('ldel:'):
+                LinkedService.objects.filter(pk=int(data.split(':')[1]), user=user).delete()
+                edit_or_send(bot, call, '🗑 سرویس از لیست شما حذف شد. کانفیگ خودش پابرجاست.', home_inline_keyboard())
                 return
 
             if data == 'renew':

@@ -10,6 +10,7 @@ from unfold.admin import ModelAdmin, TabularInline
 from .models import (
     Broadcast,
     CardPaymentRequest,
+    LinkedService,
     Order,
     Payment,
     Plan,
@@ -218,6 +219,14 @@ class CardPaymentRequestAdmin(ModelAdmin):
     list_filter = ('status',)
     search_fields = ('user__chat_id', 'user__username', 'receipt_text')
     actions = [approve_card_requests]
+
+
+@admin.register(LinkedService)
+class LinkedServiceAdmin(ModelAdmin):
+    list_display = ('user', 'label', 'client_email', 'panel', 'inbound_id', 'created_at')
+    list_filter = ('panel',)
+    search_fields = ('user__chat_id', 'user__username', 'client_uuid', 'client_email', 'label')
+    readonly_fields = ('created_at', 'updated_at')
 
 
 @admin.action(description='قرار دادن در صف ارسال')
