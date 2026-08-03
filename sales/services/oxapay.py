@@ -46,10 +46,29 @@ def create_invoice(payment: Payment) -> Payment:
     try:
         with httpx.Client(timeout=30) as client:
             response = client.post(OXAPAY_INVOICE_URL, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
     except Exception as exc:  # noqa: BLE001
-        raise OxaPayError(f'خطا در ساخت فاکتور OxaPay: {exc}') from exc
+        raise OxaPayError(f'ارتباط با OxaPay برقرار نشد: {exc}') from exc
+
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    # OxaPay explains the real cause in the body, so never hide it behind a
+    # bare HTTP status. Auth failures arrive as 401 or as 403 from Cloudflare.
+    api_status = data.get('status') if isinstance(data, dict) else None
+    api_message = data.get('message') if isinstance(data, dict) else None
+
+    if response.status_code >= 400 or (api_status and int(api_status) >= 400):
+        detail = api_message or response.text[:300] or f'HTTP {response.status_code}'
+        if response.status_code in (401, 403) or (api_status and int(api_status) in (401, 403)):
+            raise OxaPayError(
+                f'کلید API درگاه OxaPay پذیرفته نشد. پاسخ درگاه: {detail} | '
+                'بررسی کنید: ۱) حتما Merchant API Key باشد، نه Payout یا General. '
+                '۲) اگر در پنل OxaPay محدودیت IP فعال کرده‌اید، IP این سرور را مجاز کنید. '
+                '۳) حساب OxaPay شما فعال و تاییدشده باشد.'
+            )
+        raise OxaPayError(f'خطا در ساخت فاکتور OxaPay: {detail}')
 
     raw_data = data.get('data') if isinstance(data, dict) else None
     if not isinstance(raw_data, dict):
