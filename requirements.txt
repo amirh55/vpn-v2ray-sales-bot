@@ -1,5 +1,7 @@
 Django==5.1.4
-django-unfold==0.102.0
+# نسخه 0.81.0 آخرین نسخه‌ای است که با Python 3.10 (اوبونتو 22.04) هم کار می‌کند.
+# نسخه‌های 0.82 به بالا حداقل Python 3.11/3.12 می‌خواهند.
+django-unfold==0.81.0
 pyTelegramBotAPI==4.24.0
 httpx==0.27.2
 python-dotenv==1.0.1

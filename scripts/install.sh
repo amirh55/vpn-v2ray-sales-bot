@@ -51,7 +51,13 @@ elif command -v yum >/dev/null 2>&1; then
 else
   die "پکیج‌منیجر پشتیبانی‌شده پیدا نشد. سیستم‌عامل باید Debian/Ubuntu یا CentOS/Rocky باشد."
 fi
-green "پیش‌نیازها نصب شد."
+PY_VERSION="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+  red "نسخه پایتون سرور شما $PY_VERSION است، ولی حداقل 3.10 لازم است."
+  red "سیستم‌عامل سرور را به اوبونتو 22.04 یا بالاتر ارتقا دهید."
+  exit 1
+fi
+green "پیش‌نیازها نصب شد. (Python $PY_VERSION)"
 
 step "دریافت سورس پروژه"
 if [ -d "$APP_DIR/.git" ]; then
