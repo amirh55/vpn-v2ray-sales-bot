@@ -43,7 +43,10 @@ step "نصب پیش‌نیازهای سیستم"
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq python3 python3-venv python3-pip git curl >/dev/null
+  # The image libraries are a fallback: if a wheel is ever unavailable for the
+  # running Python, pip can still build Pillow instead of stopping the install.
+  apt-get install -y -qq python3 python3-venv python3-pip git curl \
+    libjpeg-dev zlib1g-dev >/dev/null
 elif command -v dnf >/dev/null 2>&1; then
   dnf install -y -q python3 python3-pip git curl >/dev/null
 elif command -v yum >/dev/null 2>&1; then
@@ -51,13 +54,47 @@ elif command -v yum >/dev/null 2>&1; then
 else
   die "پکیج‌منیجر پشتیبانی‌شده پیدا نشد. سیستم‌عامل باید Debian/Ubuntu یا CentOS/Rocky باشد."
 fi
-PY_VERSION="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
-  red "نسخه پایتون سرور شما $PY_VERSION است، ولی حداقل 3.10 لازم است."
-  red "سیستم‌عامل سرور را به اوبونتو 22.04 یا بالاتر ارتقا دهید."
-  exit 1
+green "پیش‌نیازها نصب شد."
+
+# Django 5.1 supports 3.10 to 3.13. A server whose default python3 is newer
+# needs a supported interpreter installed alongside it, otherwise the app runs
+# on a version its own framework does not support.
+PY_MIN=10
+PY_MAX=13
+
+py_supported() {
+  "$1" -c "import sys
+v = sys.version_info
+sys.exit(0 if (3, $PY_MIN) <= (v[0], v[1]) <= (3, $PY_MAX) else 1)" >/dev/null 2>&1
+}
+
+find_python() {
+  for candidate in python3 python3.13 python3.12 python3.11 python3.10; do
+    if command -v "$candidate" >/dev/null 2>&1 && py_supported "$candidate"; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+step "انتخاب نسخه پایتون"
+SYSTEM_PY_VERSION="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo '?')"
+if ! PYTHON_BIN="$(find_python)"; then
+  yellow "پایتون سیستم ($SYSTEM_PY_VERSION) پشتیبانی نمی‌شود. نسخه سازگار لازم است: 3.$PY_MIN تا 3.$PY_MAX"
+  yellow "در حال نصب یک نسخه سازگار..."
+  if command -v apt-get >/dev/null 2>&1; then
+    for want in 3.13 3.12 3.11 3.10; do
+      if apt-get install -y -qq "python$want" "python$want-venv" "python$want-dev" >/dev/null 2>&1; then
+        break
+      fi
+    done
+  fi
+  PYTHON_BIN="$(find_python)" || die \
+    "پایتون سازگار (3.$PY_MIN تا 3.$PY_MAX) پیدا نشد و نصب خودکار هم ناموفق بود. یکی از آن‌ها را دستی نصب کنید."
 fi
-green "پیش‌نیازها نصب شد. (Python $PY_VERSION)"
+PY_VERSION="$("$PYTHON_BIN" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+green "پایتون انتخاب‌شده: $PYTHON_BIN (نسخه $PY_VERSION)"
 
 step "دریافت سورس پروژه"
 if [ -d "$APP_DIR/.git" ]; then
@@ -72,7 +109,13 @@ else
 fi
 
 step "ساخت محیط پایتون و نصب کتابخانه‌ها"
-[ -x "$APP_DIR/.venv/bin/python" ] || python3 -m venv "$APP_DIR/.venv"
+# A venv built on an unsupported interpreter, or by a failed earlier run, is
+# rebuilt rather than reused; pip would otherwise keep failing the same way.
+if [ -x "$APP_DIR/.venv/bin/python" ] && ! py_supported "$APP_DIR/.venv/bin/python"; then
+  yellow "محیط مجازی قبلی روی پایتون ناسازگار ساخته شده بود؛ بازسازی می‌شود."
+  rm -rf "$APP_DIR/.venv"
+fi
+[ -x "$APP_DIR/.venv/bin/python" ] || "$PYTHON_BIN" -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install --upgrade pip -q
 "$APP_DIR/.venv/bin/pip" install -r "$APP_DIR/requirements.txt" -q
 green "کتابخانه‌ها نصب شد."

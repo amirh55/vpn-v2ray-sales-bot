@@ -41,6 +41,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/amirh55/vpn-v2ray-sales-bot/
 این اسکریپت خودش همه کارها را انجام می‌دهد:
 
 - نصب پیش‌نیازها (python، git، pip)
+- انتخاب خودکار نسخه سازگار پایتون (۳.۱۰ تا ۳.۱۳) و نصب آن اگر پایتون سیستم جدیدتر باشد
 - دریافت سورس در `/opt/vpnshop` و ساخت محیط مجازی
 - ساخت `SECRET_KEY` و یک **مسیر مخفی تصادفی** برای پنل
 - اجرای migrate و collectstatic
