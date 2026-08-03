@@ -30,11 +30,9 @@ from sales.services.formatting import days_text, fa_digits, parse_toman, toman, 
 from sales.services.oxapay import OxaPayError, create_invoice, toman_to_usd
 from sales.services.provisioning import create_order_from_wallet, provision_order, renew_order_from_wallet
 
-# Telegram gives no control over button colour, so the coloured squares stand
-# in for it: green for buying, blue for wallet and renewal.
-BTN_NEW = '🟢 خرید اشتراک جدید'
-BTN_RENEW = '🔵 تمدید اشتراک'
-BTN_WALLET = '🔵 کیف پول + شارژ'
+BTN_NEW = '🛒 خرید اشتراک جدید'
+BTN_RENEW = '🔁 تمدید اشتراک'
+BTN_WALLET = '💳 کیف پول + شارژ'
 BTN_SERVICES = '📦 سرویس‌های من'
 BTN_ADD = '➕ افزودن اشتراک قدیمی'
 BTN_TUTORIAL = '📚 آموزش اتصال'
@@ -83,8 +81,13 @@ def main_reply_keyboard() -> types.ReplyKeyboardMarkup:
     attaching them under the welcome message as inline buttons.
     """
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=False)
-    kb.row(BTN_NEW)
-    kb.row(BTN_RENEW, BTN_WALLET)
+    # Bot API 9.4 colours: 'success' green, 'primary' blue, 'danger' red.
+    # Older clients simply ignore the field and draw the default button.
+    kb.row(types.KeyboardButton(BTN_NEW, style='success'))
+    kb.row(
+        types.KeyboardButton(BTN_RENEW, style='primary'),
+        types.KeyboardButton(BTN_WALLET, style='primary'),
+    )
     kb.row(BTN_SERVICES, BTN_ADD)
     kb.row(BTN_TUTORIAL, BTN_CONTACT)
     return kb
