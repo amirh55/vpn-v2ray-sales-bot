@@ -175,19 +175,31 @@ run_manage collectstatic --noinput >/dev/null
 green "دیتابیس و فایل‌های استاتیک آماده شد."
 
 step "ساخت کاربر مدیر"
-HAS_ADMIN="$(run_manage shell -c 'from django.contrib.auth import get_user_model; print(get_user_model().objects.filter(is_superuser=True).exists())' 2>/dev/null | tr -d '[:space:]' || true)"
+# `manage.py shell -c` prints an "N objects imported automatically" banner
+# before our own output, so match on the marker instead of the whole string.
+# Getting this wrong made every re-run try to create "admin" again and abort
+# the update on "username is already taken".
+ADMIN_PROBE="$(run_manage shell -c 'from django.contrib.auth import get_user_model
+print("HAS_ADMIN=%s" % get_user_model().objects.filter(is_superuser=True).exists())' 2>/dev/null || true)"
 ADMIN_USER=""
 ADMIN_PASS=""
-if [ "$HAS_ADMIN" = "True" ]; then
+if printf '%s' "$ADMIN_PROBE" | grep -q 'HAS_ADMIN=True'; then
   yellow "کاربر مدیر از قبل وجود دارد؛ ساخت کاربر جدید انجام نشد."
 else
   ADMIN_USER="admin"
   ADMIN_PASS="$(random_password)"
-  DJANGO_SUPERUSER_USERNAME="$ADMIN_USER" \
-  DJANGO_SUPERUSER_EMAIL="admin@localhost" \
-  DJANGO_SUPERUSER_PASSWORD="$ADMIN_PASS" \
-    run_manage createsuperuser --noinput >/dev/null
-  green "کاربر مدیر ساخته شد."
+  # Never let this stop an update: an existing admin is a fine reason to skip.
+  if DJANGO_SUPERUSER_USERNAME="$ADMIN_USER" \
+     DJANGO_SUPERUSER_EMAIL="admin@localhost" \
+     DJANGO_SUPERUSER_PASSWORD="$ADMIN_PASS" \
+     run_manage createsuperuser --noinput >/dev/null 2>&1; then
+    green "کاربر مدیر ساخته شد."
+  else
+    ADMIN_USER=""
+    ADMIN_PASS=""
+    yellow "کاربر مدیر از قبل وجود داشت؛ رمز فعلی دست‌نخورده ماند."
+    yellow "برای تغییر رمز:  vpnshop passwd admin"
+  fi
 fi
 
 step "ساخت سرویس‌های systemd"
