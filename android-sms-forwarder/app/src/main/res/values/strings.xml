@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">فوروارد پیامک فروشگاه</string>
+
+    <string name="intro">این برنامه پیامک‌های بانکی گوشی شما را به فروشگاهتان می‌فرستد تا پرداخت‌های کارت‌به‌کارت خودکار تایید شوند. آدرس وبهوک را از پنل، بخش «تایید خودکار با پیامک بانکی» کپی کنید.</string>
+
+    <string name="webhook_label">آدرس وبهوک</string>
+    <string name="webhook_hint">https://example.com/api/payments/sms/webhook/?secret=…</string>
+
+    <string name="save">ذخیره</string>
+    <string name="test">تست اتصال</string>
+    <string name="enabled">ارسال پیامک‌ها فعال باشد</string>
+    <string name="battery_button">اجازه اجرا در پس‌زمینه (بهینه‌سازی باتری)</string>
+
+    <string name="saved">ذخیره شد</string>
+    <string name="url_invalid">آدرس باید با http:// یا https:// شروع شود</string>
+    <string name="permission_needed">بدون اجازه خواندن پیامک، برنامه کار نمی‌کند</string>
+    <string name="testing">در حال تست…</string>
+
+    <string name="test_ok">تست موفق بود (کد %1$d). فروشگاه پیام را دریافت کرد.</string>
+    <string name="test_rejected">فروشگاه پیام را رد کرد (کد %1$d). آدرس و secret را بررسی کنید.</string>
+    <string name="test_failed">ارتباط برقرار نشد. اینترنت گوشی و آدرس را بررسی کنید.</string>
+
+    <string name="status_sms_ok">✅ اجازه خواندن پیامک داده شده</string>
+    <string name="status_sms_missing">⚠️ اجازه خواندن پیامک داده نشده</string>
+    <string name="status_url_ok">✅ آدرس وبهوک ذخیره شده</string>
+    <string name="status_url_missing">⚠️ آدرس وبهوک وارد نشده</string>
+    <string name="status_battery_ok">✅ اجرا در پس‌زمینه مجاز است</string>
+    <string name="status_battery_warn">⚠️ بهینه‌سازی باتری روشن است؛ ممکن است پیامک‌ها دیر برسند</string>
+    <string name="status_on">✅ ارسال فعال است</string>
+    <string name="status_off">⏸ ارسال موقتا خاموش است</string>
+    <string name="status_last">آخرین نتیجه: %1$s</string>
+</resources>
