@@ -1,13 +1,13 @@
 import types
 
-from django.conf import settings
 from django.contrib import admin, messages
 from django.db.models import Sum
 from django.http import HttpResponse, HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils import timezone
-from django.utils.html import format_html
+from django.utils.html import escape, format_html
+from django.utils.safestring import mark_safe
 
 from unfold.admin import ModelAdmin, TabularInline
 
@@ -16,6 +16,7 @@ from .services.cardpay import approve_request
 from .services.delivery import send_order
 from .services.payments import settle_payment
 from .services.provisioning import provision_order
+from .services.site_urls import admin_url, certificate_status, oxapay_webhook_url, sms_webhook_url
 
 from .models import (
     BankSms,
@@ -82,6 +83,14 @@ class SiteSettingAdmin(ModelAdmin):
     fieldsets = (
         ('ربات و پشتیبانی', {'fields': ('title', 'telegram_bot_token', 'support_chat_id', 'admin_chat_id', 'is_shop_active')}),
         ('قیمت و درگاه', {'fields': ('dollar_rate_toman', 'oxapay_merchant_api_key', 'oxapay_sandbox', 'invoice_lifetime_minutes', 'oxapay_fee_paid_by_payer')}),
+        ('دامنه و SSL', {
+            'fields': ('public_domain', 'force_https', 'ssl_cert_path', 'ssl_key_path', 'domain_status'),
+            'description': (
+                'دامنه‌ای که پنل و ربات روی آن در دسترس هستند. '
+                'آدرس webhook درگاه پرداخت و پیامک از همین ساخته می‌شود. '
+                'بعد از ذخیره، برای اعمال روی Nginx روی سرور بزنید: <code>vpnshop domain</code>'
+            ),
+        }),
         ('کارت‌به‌کارت', {
             'fields': (
                 'card_to_card_enabled', 'card_number', 'card_holder_name', 'card_bank_name',
@@ -95,7 +104,24 @@ class SiteSettingAdmin(ModelAdmin):
         ('پشتیبان‌گیری', {'fields': ('backup_tools',)}),
     )
 
-    readonly_fields = ('sms_webhook_url', 'backup_tools')
+    readonly_fields = ('sms_webhook_url', 'backup_tools', 'domain_status')
+
+    @admin.display(description='وضعیت دامنه و گواهی')
+    def domain_status(self, obj):
+        if not obj or not obj.pk:
+            return 'بعد از ذخیره نمایش داده می‌شود'
+        rows = [
+            f'<b>آدرس فعلی پنل:</b> <code>{escape(admin_url())}</code>',
+            f'<b>Webhook درگاه:</b> <code>{escape(oxapay_webhook_url())}</code>',
+        ]
+        for row in certificate_status(obj):
+            mark = '✅' if row['ok'] else '⚠️'
+            # The paths are typed by the operator, so escape before embedding.
+            path = f' <code>{escape(row["path"])}</code>' if row['path'] else ''
+            rows.append(f'{mark} <b>{escape(row["label"])}:</b>{path} — {escape(row["note"])}')
+        if not obj.public_domain:
+            rows.append('⚠️ دامنه وارد نشده؛ فعلا از مقدار فایل نصب استفاده می‌شود.')
+        return mark_safe('<br>'.join(rows))  # noqa: S308 - values are paths and URLs we build
 
     def has_add_permission(self, request):
         return not SiteSetting.objects.exists()
@@ -161,7 +187,7 @@ class SiteSettingAdmin(ModelAdmin):
             return 'بعد از ذخیره نمایش داده می‌شود'
         if not obj.sms_webhook_secret:
             return 'ابتدا کلید مخفی را ذخیره کنید یا خالی بگذارید تا خودکار ساخته شود'
-        url = f'{settings.PUBLIC_BASE_URL}/api/payments/sms/webhook/?secret={obj.sms_webhook_secret}'
+        url = sms_webhook_url()
         return format_html(
             'این آدرس را در اپ پیامک‌فرست گوشی وارد کنید:<br>'
             '<code style="user-select:all;word-break:break-all;">{}</code>',

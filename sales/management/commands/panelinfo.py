@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 
 from sales.models import Order, SiteSetting, TelegramUser
+from sales.services.site_urls import admin_url, oxapay_webhook_url, public_base_url, sms_webhook_url
 
 
 def _mask(value: str) -> str:
@@ -32,7 +33,8 @@ class Command(BaseCommand):
         except (AttributeError, ValueError):
             pass
 
-        panel_url = f'{settings.PUBLIC_BASE_URL}/{settings.ADMIN_PATH}'
+        panel_url = admin_url()
+        base_url = public_base_url()
 
         if options['url_only']:
             self.stdout.write(panel_url)
@@ -72,19 +74,15 @@ class Command(BaseCommand):
         self.stdout.write(f'  کل سفارش‌ها:   {Order.objects.count()}')
         self.stdout.write('')
 
-        webhook_url = f'{settings.PUBLIC_BASE_URL}/api/payments/oxapay/webhook/'
-        self.stdout.write('  Webhook درگاه: ' + webhook_url)
-        if site and site.card_to_card_enabled and site.sms_webhook_secret:
-            self.stdout.write(
-                '  Webhook پیامک: '
-                f'{settings.PUBLIC_BASE_URL}/api/payments/sms/webhook/?secret={site.sms_webhook_secret}'
-            )
+        self.stdout.write('  Webhook درگاه: ' + oxapay_webhook_url())
+        if site and site.card_to_card_enabled and sms_webhook_url():
+            self.stdout.write('  Webhook پیامک: ' + sms_webhook_url())
         self.stdout.write(f'  مسیر داده‌ها:  {settings.DATABASES["default"]["NAME"]}')
         self.stdout.write('')
 
         if settings.DEBUG:
             self.stdout.write(self.style.WARNING('  هشدار: DEBUG روشن است. روی سرور واقعی DEBUG=0 بگذارید.'))
-        if settings.PUBLIC_BASE_URL.startswith('http://') and '127.0.0.1' not in settings.PUBLIC_BASE_URL:
+        if base_url.startswith('http://') and '127.0.0.1' not in base_url:
             self.stdout.write(self.style.WARNING('  هشدار: پنل روی HTTP است. مسیر مخفی فقط با HTTPS واقعا امن می‌ماند.'))
 
         self.stdout.write(self.style.SUCCESS(line))

@@ -34,6 +34,30 @@ class SiteSetting(TimeStampedModel):
     invoice_lifetime_minutes = models.PositiveIntegerField('مهلت پرداخت فاکتور OxaPay / دقیقه', default=60)
     oxapay_fee_paid_by_payer = models.BooleanField('کارمزد OxaPay با پرداخت‌کننده باشد', default=True)
 
+    public_domain = models.CharField(
+        'دامنه پنل و ربات',
+        max_length=255,
+        blank=True,
+        help_text='فقط دامنه، بدون https:// و بدون اسلش. مثل shop.example.com',
+    )
+    force_https = models.BooleanField(
+        'آدرس‌ها با https ساخته شوند',
+        default=True,
+        help_text='اگر روی دامنه گواهی SSL دارید روشن بماند.',
+    )
+    ssl_cert_path = models.CharField(
+        'مسیر فایل گواهی SSL',
+        max_length=500,
+        blank=True,
+        help_text='مثل /etc/letsencrypt/live/shop.example.com/fullchain.pem',
+    )
+    ssl_key_path = models.CharField(
+        'مسیر فایل کلید خصوصی SSL',
+        max_length=500,
+        blank=True,
+        help_text='مثل /etc/letsencrypt/live/shop.example.com/privkey.pem',
+    )
+
     card_to_card_enabled = models.BooleanField('پرداخت کارت‌به‌کارت فعال باشد', default=False)
     card_number = models.CharField(
         'شماره کارت',

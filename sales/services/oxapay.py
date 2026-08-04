@@ -6,7 +6,6 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 import httpx
-from django.conf import settings as django_settings
 
 from sales.models import Payment, SiteSetting
 
@@ -57,7 +56,11 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> tu
 
 
 def _callback_url() -> str:
-    return f'{django_settings.PUBLIC_BASE_URL}/api/payments/oxapay/webhook/'
+    # Imported here because site_urls imports models, and this module is
+    # imported during app loading.
+    from sales.services.site_urls import oxapay_webhook_url
+
+    return oxapay_webhook_url()
 
 
 def create_invoice_v1(payment: Payment, site: SiteSetting, merchant_key: str) -> dict[str, Any]:
