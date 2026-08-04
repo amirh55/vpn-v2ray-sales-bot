@@ -1,5 +1,6 @@
 import types
 
+from django import forms
 from django.contrib import admin, messages
 from django.db.models import Sum
 from django.http import HttpResponse, HttpResponseRedirect
@@ -40,6 +41,25 @@ from .models import (
     WalletTransaction,
     XUIPanel,
 )
+
+class DomainForm(forms.ModelForm):
+    """Just the domain fields, so they get their own page in the sidebar."""
+
+    class Meta:
+        model = SiteSetting
+        fields = ('public_domain', 'force_https', 'ssl_cert_path', 'ssl_key_path')
+
+    def clean_public_domain(self):
+        value = (self.cleaned_data.get('public_domain') or '').strip().strip('/')
+        if value.startswith(('http://', 'https://')):
+            value = value.split('://', 1)[1].strip('/')
+        # A path or port here would end up in nginx's server_name and break it.
+        if '/' in value:
+            raise forms.ValidationError('فقط دامنه را وارد کنید، بدون مسیر. مثل shop.example.com')
+        if ' ' in value:
+            raise forms.ValidationError('دامنه نباید فاصله داشته باشد.')
+        return value
+
 
 admin.site.site_header = 'پنل مدیریت فروش کانفیگ VPN'
 admin.site.site_title = 'فروشگاه VPN'
@@ -89,14 +109,7 @@ class SiteSettingAdmin(ModelAdmin):
     fieldsets = (
         ('ربات و پشتیبانی', {'fields': ('title', 'telegram_bot_token', 'support_chat_id', 'admin_chat_id', 'is_shop_active')}),
         ('قیمت و درگاه', {'fields': ('dollar_rate_toman', 'oxapay_merchant_api_key', 'oxapay_sandbox', 'invoice_lifetime_minutes', 'oxapay_fee_paid_by_payer')}),
-        ('دامنه و SSL', {
-            'fields': ('public_domain', 'force_https', 'ssl_cert_path', 'ssl_key_path', 'domain_status'),
-            'description': (
-                'دامنه‌ای که پنل و ربات روی آن در دسترس هستند. '
-                'آدرس webhook درگاه پرداخت و پیامک از همین ساخته می‌شود. '
-                'بعد از ذخیره، برای اعمال روی Nginx روی سرور بزنید: <code>vpnshop domain</code>'
-            ),
-        }),
+        ('دامنه و SSL', {'fields': ('domain_tools',)}),
         ('کارت‌به‌کارت', {
             'fields': (
                 'card_to_card_enabled', 'card_number', 'card_holder_name', 'card_bank_name',
@@ -110,7 +123,14 @@ class SiteSettingAdmin(ModelAdmin):
         ('پشتیبان‌گیری', {'fields': ('backup_tools',)}),
     )
 
-    readonly_fields = ('sms_webhook_url', 'backup_tools', 'domain_status')
+    readonly_fields = ('sms_webhook_url', 'backup_tools', 'domain_tools')
+
+    @admin.display(description='دامنه و SSL')
+    def domain_tools(self, obj):
+        return format_html(
+            '<a href="{}" style="text-decoration:underline;">رفتن به صفحه دامنه و SSL</a>',
+            reverse('admin:sales_domain'),
+        )
 
     @admin.display(description='وضعیت دامنه و گواهی')
     def domain_status(self, obj):
@@ -154,6 +174,11 @@ class SiteSettingAdmin(ModelAdmin):
                 self.admin_site.admin_view(self.backup_download_view),
                 name='sales_backup_download',
             ),
+            path(
+                'domain/',
+                self.admin_site.admin_view(self.domain_view),
+                name='sales_domain',
+            ),
         ]
         return custom + super().get_urls()
 
@@ -181,6 +206,34 @@ class SiteSettingAdmin(ModelAdmin):
             'title': 'پشتیبان‌گیری و بازگردانی',
         }
         return TemplateResponse(request, 'admin/sales/backup.html', context)
+
+    def domain_view(self, request):
+        site = SiteSetting.get_solo()
+        if request.method == 'POST':
+            form = DomainForm(request.POST, instance=site)
+            if form.is_valid():
+                form.save()
+                messages.success(
+                    request,
+                    'ذخیره شد. برای اینکه دامنه واقعا کار کند، روی سرور «vpnshop domain» را اجرا کنید.',
+                )
+                return HttpResponseRedirect(request.path)
+            messages.error(request, 'مقادیر واردشده معتبر نیستند.')
+        else:
+            form = DomainForm(instance=site)
+
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'دامنه و SSL',
+            'form': form,
+            'panel_url': admin_url(),
+            'oxapay_url': oxapay_webhook_url(),
+            'sms_url': sms_webhook_url(),
+            'cert_rows': certificate_status(site),
+            'domain_live': domain_is_live(site),
+            'has_domain': bool(site.public_domain),
+        }
+        return TemplateResponse(request, 'admin/sales/domain.html', context)
 
     def backup_download_view(self, request):
         response = HttpResponse(create_backup(), content_type='application/zip')

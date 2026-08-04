@@ -135,6 +135,11 @@ UNFOLD = {
                         'link': reverse_lazy('admin:sales_xuipanel_changelist'),
                     },
                     {
+                        'title': _('دامنه و SSL'),
+                        'icon': 'lock',
+                        'link': reverse_lazy('admin:sales_domain'),
+                    },
+                    {
                         'title': _('پشتیبان‌گیری و بازگردانی'),
                         'icon': 'backup',
                         'link': reverse_lazy('admin:sales_backup'),

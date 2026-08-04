@@ -1,0 +1,111 @@
+{% extends 'admin/base_site.html' %}
+
+{% block content %}
+<div class="flex flex-col gap-6 max-w-3xl">
+
+  {% if has_domain and not domain_live %}
+  <div class="bg-red-50 border border-red-300 p-6 rounded-default dark:bg-red-950 dark:border-red-800">
+    <h2 class="font-semibold text-lg mb-2 text-red-700 dark:text-red-300">
+      این دامنه هنوز اعمال نشده است
+    </h2>
+    <p class="mb-3 text-red-700 dark:text-red-300">
+      ذخیره کردن در این صفحه به تنهایی کافی نیست. تنظیمات وب‌سرور باید به‌روز شود،
+      وگرنه باز شدن پنل با دامنه خطای ۴۰۰ می‌دهد. روی سرور بزنید:
+    </p>
+    <pre class="bg-base-900 overflow-x-auto p-3 rounded-default text-white text-sm">vpnshop domain</pre>
+  </div>
+  {% elif has_domain %}
+  <div class="bg-green-50 border border-green-300 p-4 rounded-default dark:bg-green-950 dark:border-green-800">
+    <p class="text-green-700 dark:text-green-300">✅ دامنه روی سرور اعمال شده است.</p>
+  </div>
+  {% endif %}
+
+  <div class="bg-white border border-base-200 p-6 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
+    <h2 class="font-semibold text-lg mb-2 text-font-important-light dark:text-font-important-dark">
+      دامنه و گواهی SSL
+    </h2>
+    <p class="mb-4 text-font-subtle-light dark:text-font-subtle-dark">
+      دامنه‌ای که پنل روی آن باز می‌شود. آدرس Webhook درگاه پرداخت و پیامک بانکی هم
+      از همین ساخته می‌شوند، پس با عوض کردن آن همه‌جا به‌روز می‌شود.
+    </p>
+
+    <form method="post" class="flex flex-col gap-4">
+      {% csrf_token %}
+      {% for field in form %}
+        <div class="flex flex-col gap-1">
+          <label for="{{ field.id_for_label }}" class="font-medium text-font-important-light dark:text-font-important-dark">
+            {{ field.label }}
+          </label>
+          {{ field }}
+          {% if field.help_text %}
+            <span class="text-sm text-font-subtle-light dark:text-font-subtle-dark">{{ field.help_text }}</span>
+          {% endif %}
+          {% for error in field.errors %}
+            <span class="text-sm text-red-600 dark:text-red-400">{{ error }}</span>
+          {% endfor %}
+        </div>
+      {% endfor %}
+
+      <button type="submit"
+              class="bg-primary-600 font-medium inline-flex items-center gap-2 px-4 py-2 rounded-default text-white w-fit hover:bg-primary-700">
+        <span class="material-symbols-outlined text-sm!">save</span>
+        ذخیره
+      </button>
+    </form>
+  </div>
+
+  <div class="bg-white border border-base-200 p-6 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
+    <h2 class="font-semibold text-lg mb-4 text-font-important-light dark:text-font-important-dark">
+      وضعیت فعلی
+    </h2>
+
+    <div class="flex flex-col gap-3 text-sm">
+      <div>
+        <span class="font-medium">آدرس پنل:</span>
+        <code class="break-all select-all">{{ panel_url }}</code>
+      </div>
+      <div>
+        <span class="font-medium">Webhook درگاه پرداخت:</span>
+        <code class="break-all select-all">{{ oxapay_url }}</code>
+      </div>
+      {% if sms_url %}
+      <div>
+        <span class="font-medium">Webhook پیامک بانکی:</span>
+        <code class="break-all select-all">{{ sms_url }}</code>
+      </div>
+      {% endif %}
+
+      {% for row in cert_rows %}
+      <div>
+        {% if row.ok %}✅{% else %}⚠️{% endif %}
+        <span class="font-medium">{{ row.label }}:</span>
+        {% if row.path %}<code class="break-all">{{ row.path }}</code> —{% endif %}
+        {{ row.note }}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="bg-white border border-base-200 p-6 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
+    <h2 class="font-semibold text-lg mb-2 text-font-important-light dark:text-font-important-dark">
+      مراحل کار
+    </h2>
+    <ol class="flex flex-col gap-2 list-decimal pr-5 text-font-subtle-light dark:text-font-subtle-dark">
+      <li>دامنه را در DNS به IP همین سرور وصل کنید (رکورد A).</li>
+      <li>گواهی SSL را روی سرور بگیرید و مسیر فایل‌ها را بالا وارد کنید.</li>
+      <li>فرم را ذخیره کنید.</li>
+      <li>روی سرور <code>vpnshop domain</code> را اجرا کنید.</li>
+    </ol>
+    <p class="mt-4 text-font-subtle-light dark:text-font-subtle-dark">
+      آن دستور تنظیمات Nginx را می‌سازد، دامنه را به فهرست مجاز اضافه می‌کند و سرویس پنل را
+      ری‌استارت می‌کند. اگر تنظیمات معتبر نباشد، نسخه قبلی برگردانده می‌شود تا سایت از کار نیفتد.
+    </p>
+    <p class="mt-3 text-font-subtle-light dark:text-font-subtle-dark">
+      گواهی ندارید؟ روی سرور:
+    </p>
+    <pre class="bg-base-900 mt-2 overflow-x-auto p-3 rounded-default text-white text-sm">apt install certbot python3-certbot-nginx
+certbot certonly --standalone -d YOUR_DOMAIN</pre>
+  </div>
+
+</div>
+{% endblock %}
