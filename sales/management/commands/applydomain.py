@@ -12,12 +12,29 @@ import subprocess
 import sys
 from pathlib import Path
 
+from django.conf import settings as django_settings
 from django.core.management.base import BaseCommand, CommandError
 
 from sales.models import SiteSetting
-from sales.services.site_urls import admin_url, certificate_status
+from sales.services.site_urls import certificate_status
 
 NGINX_CONF = Path('/etc/nginx/conf.d/vpnshop.conf')
+ENV_FILE = Path(os.getenv('VPNSHOP_ENV_FILE', '/etc/vpnshop/vpnshop.env'))
+
+
+def update_env_file(path: Path, values: dict[str, str]) -> None:
+    """Rewrite keys in the runtime env file, keeping everything else intact.
+
+    Django reads ALLOWED_HOSTS and PUBLIC_BASE_URL from here at startup, so a
+    domain that is only stored in the panel would still be rejected with a
+    400 and the panel would stay unreachable under it.
+    """
+    lines = path.read_text(encoding='utf-8').splitlines() if path.exists() else []
+    kept = [line for line in lines if line.split('=', 1)[0].strip() not in values]
+    kept += [f'{key}={value}' for key, value in values.items()]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('\n'.join(kept).strip() + '\n', encoding='utf-8')
+    os.chmod(path, 0o600)
 
 TEMPLATE = """# ساخته‌شده توسط vpnshop domain — دستی ویرایش نکنید
 server {{
@@ -111,10 +128,25 @@ class Command(BaseCommand):
             self.stdout.write(config)
             return
 
-        if not shutil_which('nginx'):
-            raise CommandError('Nginx روی این سرور نصب نیست. اول آن را نصب کنید: apt install nginx')
         if os.geteuid() != 0:
             raise CommandError('این دستور باید با کاربر root اجرا شود.')
+
+        if not shutil_which('nginx'):
+            self.stdout.write('Nginx نصب نیست؛ در حال نصب...')
+            subprocess.run(['apt-get', 'update', '-qq'], capture_output=True)
+            subprocess.run(['apt-get', 'install', '-y', '-qq', 'nginx'], capture_output=True)
+            if not shutil_which('nginx'):
+                raise CommandError('نصب خودکار Nginx ناموفق بود. دستی نصب کنید: apt install nginx')
+
+        # Django must be told to answer for this host, or every request to the
+        # new domain comes back as a 400 no matter how nginx is configured.
+        scheme = 'https' if use_ssl else 'http'
+        hosts = [domain, '127.0.0.1', 'localhost']
+        update_env_file(ENV_FILE, {
+            'ALLOWED_HOSTS': ','.join(hosts),
+            'PUBLIC_BASE_URL': f'{scheme}://{domain}',
+        })
+        self.stdout.write(f'فایل تنظیمات به‌روز شد: {ENV_FILE}')
 
         previous = NGINX_CONF.read_text(encoding='utf-8') if NGINX_CONF.exists() else None
         NGINX_CONF.parent.mkdir(parents=True, exist_ok=True)
@@ -134,9 +166,21 @@ class Command(BaseCommand):
         if reload_result.returncode != 0:
             subprocess.run(['systemctl', 'restart', 'nginx'], capture_output=True, text=True)
 
-        self.stdout.write(self.style.SUCCESS(f'دامنه {domain} روی Nginx اعمال شد.'))
-        self.stdout.write(f'فایل تنظیمات: {NGINX_CONF}')
-        self.stdout.write(f'آدرس پنل: {admin_url()}')
+        # Gunicorn only reads the env file at startup, so the new ALLOWED_HOSTS
+        # takes effect on restart. Reload is not enough here.
+        restart = subprocess.run(
+            ['systemctl', 'restart', 'vpnshop-web'], capture_output=True, text=True
+        )
+        if restart.returncode == 0:
+            self.stdout.write('سرویس پنل ری‌استارت شد.')
+        else:
+            self.stdout.write(self.style.WARNING(
+                'ری‌استارت خودکار سرویس پنل انجام نشد. دستی بزنید: vpnshop restart'
+            ))
+
+        self.stdout.write(self.style.SUCCESS(f'دامنه {domain} اعمال شد.'))
+        self.stdout.write(f'تنظیمات Nginx: {NGINX_CONF}')
+        self.stdout.write(f'آدرس پنل: {scheme}://{domain}/{django_settings.ADMIN_PATH}')
         if not use_ssl:
             self.stdout.write(self.style.WARNING(
                 'بدون SSL تنظیم شد. برای امنیت مسیر مخفی پنل، حتما گواهی را فعال کنید.'

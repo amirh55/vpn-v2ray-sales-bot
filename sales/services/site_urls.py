@@ -61,6 +61,24 @@ def certificate_expiry(cert_path: str) -> datetime | None:
         return None
 
 
+def domain_is_live(site: SiteSetting | None = None) -> bool:
+    """Whether Django will actually answer for the configured domain.
+
+    ALLOWED_HOSTS is read from the env file at startup, so a domain saved in
+    the panel does nothing until `vpnshop domain` writes it there and restarts
+    the web service. Without this check the panel would look configured while
+    every request to the domain came back as a 400.
+    """
+    site = site or SiteSetting.get_solo()
+    domain = (site.public_domain or '').strip().strip('/')
+    if not domain:
+        return True
+    if domain.startswith(('http://', 'https://')):
+        domain = domain.split('://', 1)[1].strip('/')
+    allowed = django_settings.ALLOWED_HOSTS
+    return '*' in allowed or domain in allowed
+
+
 def certificate_status(site: SiteSetting | None = None) -> list[dict]:
     """Report on each configured certificate file, for display in the panel."""
     site = site or SiteSetting.get_solo()

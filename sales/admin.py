@@ -16,7 +16,13 @@ from .services.cardpay import approve_request
 from .services.delivery import send_order
 from .services.payments import settle_payment
 from .services.provisioning import provision_order
-from .services.site_urls import admin_url, certificate_status, oxapay_webhook_url, sms_webhook_url
+from .services.site_urls import (
+    admin_url,
+    certificate_status,
+    domain_is_live,
+    oxapay_webhook_url,
+    sms_webhook_url,
+)
 
 from .models import (
     BankSms,
@@ -121,6 +127,14 @@ class SiteSettingAdmin(ModelAdmin):
             rows.append(f'{mark} <b>{escape(row["label"])}:</b>{path} — {escape(row["note"])}')
         if not obj.public_domain:
             rows.append('⚠️ دامنه وارد نشده؛ فعلا از مقدار فایل نصب استفاده می‌شود.')
+        elif not domain_is_live(obj):
+            rows.append(
+                '⛔️ <b>این دامنه هنوز اعمال نشده است.</b> ذخیره کردن در پنل کافی نیست، '
+                'چون Nginx و تنظیمات سرور باید به‌روز شوند. روی سرور بزنید:<br>'
+                '<code>vpnshop domain</code>'
+            )
+        else:
+            rows.append('✅ دامنه روی سرور اعمال شده است.')
         return mark_safe('<br>'.join(rows))  # noqa: S308 - values are paths and URLs we build
 
     def has_add_permission(self, request):
