@@ -198,6 +198,11 @@ UNFOLD = {
                         'link': reverse_lazy('admin:sales_supportmessage_changelist'),
                     },
                     {
+                        'title': _('سوالات متداول'),
+                        'icon': 'help',
+                        'link': reverse_lazy('admin:sales_faqitem_changelist'),
+                    },
+                    {
                         'title': _('ارسال پیام گروهی/تکی'),
                         'icon': 'campaign',
                         'link': reverse_lazy('admin:sales_broadcast_changelist'),

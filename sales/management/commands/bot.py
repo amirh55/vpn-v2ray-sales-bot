@@ -14,6 +14,7 @@ from telebot import TeleBot, types
 from sales.models import (
     Broadcast,
     CardPaymentRequest,
+    FaqItem,
     LinkedService,
     Order,
     Payment,
@@ -25,7 +26,7 @@ from sales.models import (
     WalletTransaction,
 )
 from sales.services.cardpay import create_request as create_card_request
-from sales.services.delivery import order_delivery_text
+from sales.services.delivery import deliver_order
 from sales.services.linking import LinkingError, link_config, refresh_usage, usage_text
 from sales.services.formatting import days_text, fa_digits, parse_toman, toman, traffic_text, usd
 from sales.services.oxapay import OxaPayError, create_invoice, toman_to_usd
@@ -37,6 +38,7 @@ BTN_WALLET = '💳 کیف پول + شارژ'
 BTN_SERVICES = '📦 سرویس‌های من'
 BTN_ADD = '➕ افزودن اشتراک قدیمی'
 BTN_TUTORIAL = '📚 آموزش اتصال'
+BTN_FAQ = '❓ سوالات و راهنمایی'
 BTN_CONTACT = '☎️ ارتباط با ما'
 BTN_CANCEL = 'لغو و بازگشت'
 
@@ -47,6 +49,7 @@ MAIN_TEXT_ACTIONS = {
     BTN_SERVICES: 'services',
     BTN_ADD: 'addservice',
     BTN_TUTORIAL: 'tutorial',
+    BTN_FAQ: 'faq',
     BTN_CONTACT: 'contact',
     '/new': 'new',
     '/renew': 'renew',
@@ -54,6 +57,7 @@ MAIN_TEXT_ACTIONS = {
     '/services': 'services',
     '/addservice': 'addservice',
     '/tutorial': 'tutorial',
+    '/faq': 'faq',
     '/contact': 'contact',
 }
 
@@ -90,7 +94,8 @@ def main_reply_keyboard() -> types.ReplyKeyboardMarkup:
         types.KeyboardButton(BTN_WALLET, style='primary'),
     )
     kb.row(BTN_SERVICES, BTN_ADD)
-    kb.row(BTN_TUTORIAL, BTN_CONTACT)
+    kb.row(BTN_TUTORIAL, BTN_FAQ)
+    kb.row(BTN_CONTACT)
     return kb
 
 
@@ -240,18 +245,7 @@ def refund_order(order: Order, reason: str):
 
 
 def send_delivery(bot: TeleBot, chat_id: int, order: Order):
-    bot.send_message(
-        chat_id,
-        order_delivery_text(order),
-        reply_markup=main_reply_keyboard(),
-        disable_web_page_preview=True,
-    )
-    if order.qr_image:
-        try:
-            with open(order.qr_image.path, 'rb') as fh:
-                bot.send_photo(chat_id, fh, caption='QR Code اشتراک')
-        except Exception:
-            pass
+    deliver_order(bot, chat_id, order, reply_markup=main_reply_keyboard())
 
 
 def show_new_services(bot: TeleBot, chat_id: int, call=None):
@@ -436,6 +430,33 @@ def show_renew(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
     send_or_edit(bot, chat_id, 'کدام سرویس را تمدید می‌کنید؟', inline(rows), call=call)
 
 
+def show_faq(bot: TeleBot, chat_id: int, call=None):
+    """List the operator's questions as buttons under one intro message."""
+    site_now = get_site()
+    items = FaqItem.objects.filter(is_active=True)
+    if not items:
+        send_or_edit(
+            bot,
+            chat_id,
+            'هنوز سوالی ثبت نشده است. برای راهنمایی با پشتیبانی در تماس باشید.',
+            home_inline_keyboard(),
+            call=call,
+        )
+        return
+    rows = [[(item.question, f'faq:{item.pk}')] for item in items]
+    rows.append([('بازگشت', 'cancel')])
+    send_or_edit(bot, chat_id, f'❓ <b>سوالات و راهنمایی</b>\n\n{site_now.faq_intro_text}', inline(rows), call=call)
+
+
+def show_faq_answer(bot: TeleBot, chat_id: int, item_id: int, call=None):
+    item = FaqItem.objects.filter(pk=item_id, is_active=True).first()
+    if not item:
+        show_faq(bot, chat_id, call=call)
+        return
+    rows = [[('🔙 سوالات دیگر', 'faq')], [('🏠 منوی اصلی', 'cancel')]]
+    send_or_edit(bot, chat_id, f'❓ <b>{item.question}</b>\n\n{item.answer}', inline(rows), call=call)
+
+
 def show_tutorial(bot: TeleBot, chat_id: int, call=None):
     site_now = get_site()
     send_or_edit(bot, chat_id, site_now.tutorial_text or 'آموزش اتصال هنوز تنظیم نشده است.', home_inline_keyboard() if call else None, call=call)
@@ -451,7 +472,7 @@ def show_contact(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
 
 def route_main_action(bot: TeleBot, user: TelegramUser, chat_id: int, action: str):
     site_now = get_site()
-    if not site_now.is_shop_active and action not in ['contact', 'tutorial']:
+    if not site_now.is_shop_active and action not in ['contact', 'tutorial', 'faq']:
         bot.send_message(chat_id, 'فروشگاه موقتاً غیرفعال است. لطفاً بعداً مراجعه کنید.', reply_markup=main_reply_keyboard())
         return
     if action == 'new':
@@ -466,6 +487,8 @@ def route_main_action(bot: TeleBot, user: TelegramUser, chat_id: int, action: st
         show_renew(bot, user, chat_id)
     elif action == 'tutorial':
         show_tutorial(bot, chat_id)
+    elif action == 'faq':
+        show_faq(bot, chat_id)
     elif action == 'contact':
         show_contact(bot, user, chat_id)
     else:
@@ -616,6 +639,7 @@ class Command(BaseCommand):
                 types.BotCommand('addservice', 'افزودن اشتراک قدیمی با لینک کانفیگ'),
                 types.BotCommand('renew', 'تمدید اشتراک'),
                 types.BotCommand('tutorial', 'آموزش اتصال'),
+                types.BotCommand('faq', 'سوالات و راهنمایی'),
                 types.BotCommand('contact', 'ارتباط با ما'),
             ])
         except Exception:
@@ -641,7 +665,7 @@ class Command(BaseCommand):
                 '«تنظیمات اصلی ربات» → «چت آیدی پشتیبانی» ثبت کنید.',
             )
 
-        @bot.message_handler(commands=['new', 'renew', 'wallet', 'services', 'addservice', 'tutorial', 'contact'])
+        @bot.message_handler(commands=['new', 'renew', 'wallet', 'services', 'addservice', 'tutorial', 'faq', 'contact'])
         def command_router(message):
             user = ensure_user_from_message(message)
             reset_user_state(user)
@@ -780,7 +804,7 @@ class Command(BaseCommand):
                 edit_or_send(bot, call, 'به منوی اصلی برگشتید.')
                 return
 
-            if not site_now.is_shop_active and data not in ['contact', 'tutorial']:
+            if not site_now.is_shop_active and data not in ['contact', 'tutorial', 'faq'] and not data.startswith('faq:'):
                 edit_or_send(bot, call, 'فروشگاه موقتاً غیرفعال است. لطفاً بعداً مراجعه کنید.', home_inline_keyboard())
                 return
 
@@ -979,6 +1003,14 @@ class Command(BaseCommand):
 
             if data == 'tutorial':
                 show_tutorial(bot, call.message.chat.id, call=call)
+                return
+
+            if data == 'faq':
+                show_faq(bot, call.message.chat.id, call=call)
+                return
+
+            if data.startswith('faq:'):
+                show_faq_answer(bot, call.message.chat.id, int(data.split(':')[1]), call=call)
                 return
 
             if data == 'contact':

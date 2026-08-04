@@ -21,6 +21,7 @@ from .models import (
     BankSms,
     Broadcast,
     CardPaymentRequest,
+    FaqItem,
     LinkedService,
     Order,
     Payment,
@@ -90,7 +91,7 @@ class SiteSettingAdmin(ModelAdmin):
         ('تایید خودکار با پیامک بانکی', {
             'fields': ('card_auto_confirm_enabled', 'sms_webhook_secret', 'sms_allowed_senders', 'sms_webhook_url'),
         }),
-        ('متن‌ها', {'fields': ('tutorial_text', 'contact_intro_text', 'after_purchase_text')}),
+        ('متن‌ها', {'fields': ('tutorial_text', 'contact_intro_text', 'faq_intro_text', 'after_purchase_text')}),
         ('پشتیبان‌گیری', {'fields': ('backup_tools',)}),
     )
 
@@ -387,6 +388,14 @@ class BankSmsAdmin(ModelAdmin):
 
     def has_add_permission(self, request):
         return False
+
+
+@admin.register(FaqItem)
+class FaqItemAdmin(ModelAdmin):
+    list_display = ('question', 'sort_order', 'is_active', 'updated_at')
+    list_filter = ('is_active',)
+    list_editable = ('sort_order', 'is_active')
+    search_fields = ('question', 'answer')
 
 
 @admin.register(LinkedService)

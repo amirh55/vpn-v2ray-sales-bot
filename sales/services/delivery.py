@@ -51,25 +51,45 @@ def send_text(chat_id, text: str) -> bool:
         return False
 
 
-def send_order(order: Order) -> bool:
-    """Deliver the config links and QR code. False when nothing was sent."""
-    bot = get_bot()
-    if not bot:
-        return False
+# Telegram rejects a photo caption longer than this.
+CAPTION_LIMIT = 1024
+
+
+def deliver_order(bot, chat_id, order: Order, reply_markup=None) -> bool:
+    """Send the QR image carrying the config text as its caption.
+
+    A long config link can push the text past Telegram's caption limit, in
+    which case the text is sent on its own and the QR follows it.
+    """
+    text = order_delivery_text(order)
+
+    if order.qr_image and len(text) <= CAPTION_LIMIT:
+        try:
+            with open(order.qr_image.path, 'rb') as handle:
+                bot.send_photo(chat_id, handle, caption=text, reply_markup=reply_markup)
+            return True
+        except Exception:  # noqa: BLE001
+            # Fall through and deliver as text so the customer still gets the config.
+            pass
+
     try:
-        bot.send_message(
-            order.user.chat_id,
-            order_delivery_text(order),
-            disable_web_page_preview=True,
-        )
+        bot.send_message(chat_id, text, reply_markup=reply_markup, disable_web_page_preview=True)
     except Exception:  # noqa: BLE001
         return False
 
     if order.qr_image:
         try:
             with open(order.qr_image.path, 'rb') as handle:
-                bot.send_photo(order.user.chat_id, handle, caption='QR Code اشتراک')
+                bot.send_photo(chat_id, handle, caption='QR Code اشتراک')
         except Exception:  # noqa: BLE001
             # The links already went out; a missing QR is not a failed delivery.
             pass
     return True
+
+
+def send_order(order: Order) -> bool:
+    """Deliver the config links and QR code. False when nothing was sent."""
+    bot = get_bot()
+    if not bot:
+        return False
+    return deliver_order(bot, order.user.chat_id, order)

@@ -61,6 +61,11 @@ class SiteSetting(TimeStampedModel):
 
     tutorial_text = models.TextField('متن آموزش اتصال', blank=True, default='آموزش اتصال را از این بخش تنظیم کنید.')
     contact_intro_text = models.TextField('متن بخش ارتباط با ما', blank=True, default='پیام خود را ارسال کنید. پشتیبانی پاسخ شما را بررسی می‌کند.')
+    faq_intro_text = models.TextField(
+        'متن بالای بخش سوالات متداول',
+        blank=True,
+        default='سوال خود را از لیست زیر انتخاب کنید تا پاسخ آن را ببینید.',
+    )
     after_purchase_text = models.TextField('متن بعد از خرید موفق', blank=True, default='اشتراک شما با موفقیت ساخته شد.')
     is_shop_active = models.BooleanField('فروشگاه فعال باشد', default=True)
 
@@ -426,6 +431,31 @@ class LinkedService(TimeStampedModel):
 
     def display_name(self) -> str:
         return self.label or self.client_email or self.client_uuid[:12]
+
+
+class FaqItem(TimeStampedModel):
+    """One question the customer can tap to read its answer.
+
+    The operator writes these in the panel, so the bot's help section can be
+    changed without touching code.
+    """
+
+    question = models.CharField(
+        'سوال',
+        max_length=100,
+        help_text='روی دکمه نمایش داده می‌شود، پس کوتاه بنویسید. حداکثر ۱۰۰ کاراکتر.',
+    )
+    answer = models.TextField('پاسخ', help_text='می‌توانید از تگ‌های <b> و <code> و لینک استفاده کنید.')
+    sort_order = models.PositiveIntegerField('ترتیب نمایش', default=10)
+    is_active = models.BooleanField('فعال', default=True)
+
+    class Meta:
+        verbose_name = 'سوال متداول'
+        verbose_name_plural = 'سوالات متداول'
+        ordering = ['sort_order', 'pk']
+
+    def __str__(self) -> str:
+        return self.question
 
 
 class Broadcast(TimeStampedModel):
