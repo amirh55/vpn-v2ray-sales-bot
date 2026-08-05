@@ -77,12 +77,49 @@ def build_client_payload(order: Order, client_uuid: str, client_email: str, expi
     }
 
 
+def build_links(order: Order, xui: 'XUIClient', *, client_uuid: str, client_email: str) -> tuple[str, str]:
+    """The config and subscription links to hand the customer.
+
+    The panel is asked first. It is the only party that knows the inbound's
+    protocol, TLS and Reality settings, so its answer is right by construction —
+    a hand-written template has to reproduce all of that and silently produces a
+    broken link the moment an inbound is reconfigured.
+
+    A template set on the service still wins, so an operator who needs a
+    specific link shape keeps control. Templates are otherwise optional now.
+    """
+    config_link = render_template(
+        order.service.config_link_template, order=order, client_uuid=client_uuid, client_email=client_email
+    )
+    subscription_link = render_template(
+        order.service.subscription_link_template, order=order, client_uuid=client_uuid, client_email=client_email
+    )
+
+    if not config_link:
+        try:
+            links = xui.get_client_links(client_email)
+        except XUIError:
+            links = []
+        # One client can sit on several inbounds; the customer gets all of them
+        # so their app can fall back when one route is blocked.
+        config_link = '\n'.join(links)
+
+    if not subscription_link:
+        panel = order.service.panel
+        base = (panel.subscription_base_url or '').strip().rstrip('/')
+        if base:
+            subscription_link = f'{base}/sub/{client_email}'
+
+    return config_link, subscription_link
+
+
 @transaction.atomic
 def create_order_from_wallet(
     user: TelegramUser,
     plan: Plan,
     *,
     discount=None,
+    client_name: str = '',
 ) -> Order:
     """Charge the wallet and open the order.
 
@@ -108,6 +145,9 @@ def create_order_from_wallet(
         user_limit=plan.user_limit,
         discount_code=discount.code if discount else None,
         discount_toman=Decimal(discount.off_toman) if discount else Decimal('0'),
+        # The name the customer picked before paying. Empty means they were not
+        # asked, and provisioning falls back to a generated one.
+        xui_client_email=(client_name or '').strip(),
     )
     user.wallet_balance_toman -= price
     user.save(update_fields=['wallet_balance_toman', 'updated_at'])
@@ -154,8 +194,9 @@ def provision_order(order: Order) -> Order:
     order.xui_client_uuid = client_uuid
     order.xui_client_email = client_email
     order.expires_at = expires_at
-    order.config_link = render_template(order.service.config_link_template, order=order, client_uuid=client_uuid, client_email=client_email)
-    order.subscription_link = render_template(order.service.subscription_link_template, order=order, client_uuid=client_uuid, client_email=client_email)
+    order.config_link, order.subscription_link = build_links(
+        order, xui, client_uuid=client_uuid, client_email=client_email
+    )
     qr_data = order.subscription_link or order.config_link or f'{client_email}'
     order.qr_image.save(f'order_{order.pk}_qr.png', make_qr_content_file(qr_data, f'order_{order.pk}_qr.png'), save=False)
     order.status = Order.Status.PROVISIONED

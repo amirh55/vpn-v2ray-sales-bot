@@ -29,7 +29,13 @@ def get_or_create_sms_secret() -> str:
     return site.sms_webhook_secret
 
 
-def create_request(user: TelegramUser, base_amount_toman: int, plan=None, discount=None) -> CardPaymentRequest:
+def create_request(
+    user: TelegramUser,
+    base_amount_toman: int,
+    plan=None,
+    discount=None,
+    client_name: str = '',
+) -> CardPaymentRequest:
     """Open an invoice for a distinctive figure, valid for a limited window.
 
     Passing a plan turns this into a purchase: the service is delivered as soon
@@ -49,6 +55,7 @@ def create_request(user: TelegramUser, base_amount_toman: int, plan=None, discou
         auto_purchase_after_paid=bool(plan),
         discount_code=discount.code if discount else None,
         discount_toman=Decimal(discount.off_toman) if discount else Decimal('0'),
+        client_name=(client_name or '').strip(),
     )
 
 
@@ -89,7 +96,9 @@ def approve_request(request: CardPaymentRequest, *, auto: bool, note: str = '') 
             # Re-checked rather than trusted: a transfer can land after the code
             # has expired, and resolve() returns None then.
             discount = resolve(locked.discount_code_id, locked.user, locked.pending_plan)
-            order = create_order_from_wallet(locked.user, locked.pending_plan, discount=discount)
+            order = create_order_from_wallet(
+                locked.user, locked.pending_plan, discount=discount, client_name=locked.client_name
+            )
             order = provision_order(order)
             locked.created_order = order
             locked.save(update_fields=['created_order', 'updated_at'])

@@ -101,13 +101,28 @@ class XUIClient:
     def _ok(result: dict[str, Any]) -> bool:
         return result.get('success') is not False
 
+    # The secret that goes in a share link. 3x-ui 3.x names it `uuid` for
+    # vless/vmess, `password` for trojan/shadowsocks and `auth` for hysteria.
+    # `id` is checked last and only when it looks like a secret, because on this
+    # generation of the panel `id` is the client's numeric database row — using
+    # it produced config links with a row number where the UUID belonged.
+    SECRET_KEYS = ('uuid', 'password', 'auth', 'clientId', 'client_id', 'id')
+
+    @staticmethod
+    def _looks_like_secret(value: Any) -> bool:
+        text = str(value or '').strip()
+        if len(text) < 8:
+            return False
+        # A bare integer is a row id, never a share-link secret.
+        return not text.lstrip('-').isdigit()
+
     @staticmethod
     def _extract_uuid(obj: Any) -> str:
         if isinstance(obj, dict):
-            for key in ('id', 'uuid', 'clientId', 'client_id'):
+            for key in XUIClient.SECRET_KEYS:
                 val = obj.get(key)
-                if val:
-                    return str(val)
+                if val and XUIClient._looks_like_secret(val):
+                    return str(val).strip()
             for key in ('obj', 'data', 'client', 'result'):
                 val = XUIClient._extract_uuid(obj.get(key))
                 if val:
@@ -118,8 +133,64 @@ class XUIClient:
                 if val:
                     return val
         if isinstance(obj, list) and obj:
-            return XUIClient._extract_uuid(obj[0])
+            for item in obj:
+                val = XUIClient._extract_uuid(item)
+                if val:
+                    return val
         return ''
+
+    @staticmethod
+    def _as_links(result: Any) -> list[str]:
+        """Pull share links out of whatever wrapper the panel used."""
+        if isinstance(result, dict):
+            for key in ('obj', 'data', 'result', 'links'):
+                if key in result:
+                    return XUIClient._as_links(result[key])
+            return []
+        if isinstance(result, str):
+            result = [result]
+        if not isinstance(result, list):
+            return []
+
+        links = []
+        for item in result:
+            if isinstance(item, dict):
+                # Some builds return [{remark, link}] instead of bare strings.
+                item = item.get('link') or item.get('url') or item.get('uri') or ''
+            text = str(item or '').strip()
+            if '://' in text and text not in links:
+                links.append(text)
+        return links
+
+    def get_client_links(self, email: str) -> list[str]:
+        """Every share link the panel itself would copy for this client.
+
+        Asking the panel is the only way to get a link that is correct for the
+        inbound's actual protocol, TLS and Reality settings. Building one from a
+        template means duplicating logic the panel already has, and getting it
+        wrong the moment an inbound is reconfigured.
+        """
+        last_error = None
+        for path in (f'/clients/links/{email}', f'/client/links/{email}'):
+            try:
+                links = self._as_links(self.request('GET', self._api_url(path)))
+            except XUIError as exc:
+                last_error = exc
+                continue
+            if links:
+                return links
+        if last_error is not None:
+            raise XUIError(str(last_error))
+        return []
+
+    def get_sub_links(self, sub_id: str) -> list[str]:
+        """Every link behind one subscription id."""
+        if not sub_id:
+            return []
+        try:
+            return self._as_links(self.request('GET', self._api_url(f'/clients/subLinks/{sub_id}')))
+        except XUIError:
+            return []
 
     def get_openapi(self) -> dict[str, Any]:
         """Fetch the panel's own API description.

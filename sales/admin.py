@@ -1,5 +1,5 @@
 import types
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from django import forms
 from django.contrib import admin, messages
@@ -19,7 +19,7 @@ from .services.delivery import send_order
 from .services.messaging import MessagingError, reply_to_support as send_support_reply, send as send_broadcast
 from .services.payments import settle_payment
 from .services.provisioning import provision_order
-from .services import jalali, reports
+from .services import reports
 from .services.site_urls import (
     admin_url,
     certificate_status,
@@ -67,25 +67,6 @@ class DomainForm(forms.ModelForm):
         if ' ' in value:
             raise forms.ValidationError('دامنه نباید فاصله داشته باشد.')
         return value
-
-
-def jalali_column(field_name: str, description: str, *, with_time: bool = False):
-    """A list column showing a stored datetime as a Shamsi date.
-
-    Django renders DateTimeFields with its own Gregorian formatting and there is
-    no hook to change only some of them, so the columns operators actually read
-    are replaced with one of these. Sorting still uses the real field, so the
-    order is unaffected.
-    """
-    def column(self, obj):
-        value = getattr(obj, field_name, None)
-        if value is None:
-            return '-'
-        return jalali.format_datetime(value) if with_time else jalali.format_date(value)
-
-    column.short_description = description
-    column.admin_order_field = field_name
-    return column
 
 
 admin.site.site_header = 'پنل مدیریت فروش کانفیگ VPN'
@@ -313,8 +294,7 @@ class SiteSettingAdmin(ModelAdmin):
         max_daily = max((row['revenue'] for row in report.daily), default=0)
         daily_rows = [
             {
-                'date': jalali.format_date(row['date']),
-                'gregorian': row['date'].strftime('%Y-%m-%d'),
+                'date': row['date'].strftime('%Y-%m-%d'),
                 'count': f'{row["count"]:,}',
                 'revenue': f'{row["revenue"]:,}',
                 'percent': int(row['revenue'] * 100 / max_daily) if max_daily else 0,
@@ -327,21 +307,17 @@ class SiteSettingAdmin(ModelAdmin):
             'title': 'گزارش فروش',
             'report': report,
             'active_range': range_key,
-            # The pickers stay on the browser's native Gregorian control, which
-            # needs no JavaScript and cannot be typed wrong; the Shamsi equivalent
-            # of whatever is picked is shown next to them.
-            'from_value': report.start_local.strftime('%Y-%m-%d'),
-            'to_value': report.end_local.strftime('%Y-%m-%d'),
-            'from_jalali': jalali.format_date(report.start_local),
-            'to_jalali': jalali.format_date(report.end_local),
-            'range_title': report.range_title,
+            'from_value': timezone.localtime(report.start).strftime('%Y-%m-%d'),
+            'to_value': (timezone.localtime(report.end) - timedelta(seconds=1)).strftime('%Y-%m-%d'),
+            'start_display': timezone.localtime(report.start).strftime('%Y-%m-%d'),
+            'end_display': (timezone.localtime(report.end) - timedelta(seconds=1)).strftime('%Y-%m-%d'),
             'csv_url': f'{reverse("admin:sales_report_csv")}?{request.GET.urlencode()}',
             'quick_ranges': [
                 {'key': 'today', 'title': 'امروز'},
                 {'key': 'yesterday', 'title': 'دیروز'},
                 {'key': 'week', 'title': '۷ روز'},
-                {'key': 'month', 'title': jalali.month_title(timezone.localdate())},
-                {'key': 'last_month', 'title': jalali.month_title(jalali.previous_month_day(timezone.localdate()))},
+                {'key': 'month', 'title': 'این ماه'},
+                {'key': 'last_month', 'title': 'ماه گذشته'},
                 {'key': 'year', 'title': '۱۲ ماه'},
             ],
             'cards': [
@@ -595,9 +571,8 @@ class DiscountRedemptionInline(TabularInline):
     model = DiscountRedemption
     extra = 0
     can_delete = False
-    fields = ('user', 'order', 'amount_toman', 'created_jalali')
-    readonly_fields = ('user', 'order', 'amount_toman', 'created_jalali')
-    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
+    fields = ('user', 'order', 'amount_toman', 'created_at')
+    readonly_fields = ('user', 'order', 'amount_toman', 'created_at')
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -648,17 +623,16 @@ class DiscountCodeAdmin(ModelAdmin):
         if obj.valid_until and obj.valid_until < now:
             return 'منقضی شده'
         if obj.valid_from and obj.valid_from > now:
-            return f'از {jalali.format_date(obj.valid_from)}'
+            return f'از {timezone.localtime(obj.valid_from):%Y-%m-%d}'
         if obj.valid_until:
-            return f'تا {jalali.format_date(obj.valid_until)}'
+            return f'تا {timezone.localtime(obj.valid_until):%Y-%m-%d}'
         return 'بدون محدودیت زمانی'
 
 
 @admin.register(DiscountRedemption)
 class DiscountRedemptionAdmin(ModelAdmin):
-    list_display = ('code', 'user', 'order', 'amount_toman', 'created_jalali')
+    list_display = ('code', 'user', 'order', 'amount_toman', 'created_at')
     list_filter = ('code',)
-    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('code__code', 'user__chat_id', 'user__username')
     readonly_fields = ('code', 'user', 'order', 'amount_toman', 'amount_usd', 'created_at', 'updated_at')
 
@@ -668,11 +642,10 @@ class DiscountRedemptionAdmin(ModelAdmin):
 
 @admin.register(TelegramUser)
 class TelegramUserAdmin(ModelAdmin):
-    list_display = ('chat_id', 'username', 'full_name', 'wallet_balance_toman', 'is_blocked', 'created_jalali')
+    list_display = ('chat_id', 'username', 'full_name', 'wallet_balance_toman', 'is_blocked', 'created_at')
     list_filter = ('is_blocked',)
     search_fields = ('chat_id', 'username', 'first_name', 'last_name')
     readonly_fields = ('created_at', 'updated_at')
-    created_jalali = jalali_column('created_at', 'تاریخ عضویت')
 
     @admin.display(description='نام')
     def full_name(self, obj):
@@ -715,10 +688,8 @@ def provision_and_send(modeladmin, request, queryset):
 
 @admin.register(Order)
 class OrderAdmin(ModelAdmin):
-    list_display = ('id', 'user', 'service', 'plan', 'status', 'source', 'amount_toman', 'discount_code', 'expires_jalali', 'created_jalali')
+    list_display = ('id', 'user', 'service', 'plan', 'status', 'source', 'amount_toman', 'discount_code', 'expires_at', 'created_at')
     list_filter = ('status', 'source', 'service', 'plan', 'discount_code')
-    expires_jalali = jalali_column('expires_at', 'تاریخ انقضا', with_time=True)
-    created_jalali = jalali_column('created_at', 'تاریخ ثبت')
     search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid')
     actions = [resend_order_config, provision_and_send]
     readonly_fields = ('config_link_click', 'subscription_link_click', 'qr_preview', 'created_at', 'updated_at')
@@ -750,11 +721,10 @@ class OrderAdmin(ModelAdmin):
 
 @admin.register(WalletTransaction)
 class WalletTransactionAdmin(ModelAdmin):
-    list_display = ('user', 'kind', 'amount_toman', 'balance_after_toman', 'order', 'created_jalali')
+    list_display = ('user', 'kind', 'amount_toman', 'balance_after_toman', 'order', 'created_at')
     list_filter = ('kind',)
     search_fields = ('user__chat_id', 'description')
     readonly_fields = ('created_at', 'updated_at')
-    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
 
 
 @admin.action(description='تایید دستی پرداخت، شارژ کیف پول و تحویل سرویس')
@@ -782,9 +752,8 @@ def approve_payments_manually(modeladmin, request, queryset):
 
 @admin.register(Payment)
 class PaymentAdmin(ModelAdmin):
-    list_display = ('order_id', 'user', 'provider', 'purpose', 'status', 'amount_toman', 'amount_usd', 'track_id', 'created_jalali')
+    list_display = ('order_id', 'user', 'provider', 'purpose', 'status', 'amount_toman', 'amount_usd', 'track_id', 'created_at')
     list_filter = ('provider', 'purpose', 'status')
-    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('order_id', 'track_id', 'user__chat_id', 'user__username')
     readonly_fields = ('raw_payload', 'created_at', 'updated_at')
     actions = [approve_payments_manually]
@@ -794,23 +763,21 @@ class PaymentAdmin(ModelAdmin):
 class SupportMessageAdmin(ModelAdmin):
     """Read a customer's message and answer it without leaving the panel."""
 
-    list_display = ('user', 'short_text', 'answered_state', 'created_jalali')
+    list_display = ('user', 'short_text', 'answered_state', 'created_at')
     list_filter = ('is_answered',)
     search_fields = ('user__chat_id', 'user__username', 'message_text')
     readonly_fields = (
         'user', 'message_text', 'telegram_message_id', 'is_answered',
-        'answered_at_jalali', 'reply_error', 'created_jalali',
+        'answered_at', 'reply_error', 'created_at',
     )
     fieldsets = (
-        ('پیام کاربر', {'fields': ('user', 'message_text', 'created_jalali')}),
+        ('پیام کاربر', {'fields': ('user', 'message_text', 'created_at')}),
         ('پاسخ شما', {
             'fields': ('reply_text',),
             'description': 'پاسخ را بنویسید و «ذخیره» را بزنید. پیام همان لحظه در تلگرام برای کاربر ارسال می‌شود.',
         }),
-        ('وضعیت', {'fields': ('is_answered', 'answered_at_jalali', 'reply_error', 'admin_note')}),
+        ('وضعیت', {'fields': ('is_answered', 'answered_at', 'reply_error', 'admin_note')}),
     )
-    created_jalali = jalali_column('created_at', 'تاریخ پیام', with_time=True)
-    answered_at_jalali = jalali_column('answered_at', 'زمان ارسال پاسخ', with_time=True)
 
     def has_add_permission(self, request):
         # These arrive from the bot; writing one here would have no customer.
@@ -844,7 +811,7 @@ class SupportMessageAdmin(ModelAdmin):
         messages.success(request, f'پاسخ شما برای کاربر {obj.user.chat_id} در تلگرام ارسال شد.')
 
 
-@admin.action(description='تایید و شارژ کیف پول')
+@admin.action(description='✅ تایید واریزی و ارسال کانفیگ')
 def approve_card_requests(modeladmin, request, queryset):
     # Expired invoices are approved too: the customer may have paid late or the
     # bank SMS may never have arrived, and the operator has seen the receipt.
@@ -854,23 +821,118 @@ def approve_card_requests(modeladmin, request, queryset):
             count += 1
         else:
             skipped += 1
-    text = f'{count} درخواست تایید و کیف پول شارژ شد. کاربر خودکار مطلع می‌شود.'
+    if count:
+        messages.success(
+            request,
+            f'{count} واریزی تایید شد. کیف پول شارژ و در صورت وجود پلن، کانفیگ ساخته و برای کاربر ارسال شد.',
+        )
     if skipped:
-        text += f' {skipped} مورد قبلاً تایید شده بود.'
-    messages.success(request, text)
+        messages.warning(request, f'{skipped} مورد قبلاً تایید شده بود.')
 
 
 @admin.register(CardPaymentRequest)
 class CardPaymentRequestAdmin(ModelAdmin):
+    """Approve a transfer by hand when the bank SMS never arrives.
+
+    Automatic confirmation needs the SMS forwarder installed on a phone. Until
+    then — and whenever it misses one — this is the whole settlement path, so
+    approving has to be reachable in one obvious step rather than hidden in a
+    dropdown.
+    """
+
     list_display = (
         'id', 'user', 'amount_toman', 'status', 'auto_approved',
-        'expiry_state', 'has_receipt', 'created_jalali',
+        'expiry_state', 'has_receipt', 'created_at',
     )
+    list_editable = ('status',)
     list_filter = ('status', 'auto_approved')
-    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('user__chat_id', 'user__username', 'receipt_text', 'amount_toman')
-    readonly_fields = ('base_amount_toman', 'expires_at', 'auto_approved', 'notified_at', 'created_at', 'updated_at')
+    readonly_fields = (
+        'user', 'amount_toman', 'base_amount_toman', 'expires_at', 'auto_approved',
+        'notified_at', 'created_at', 'updated_at', 'receipt_preview', 'approval_help',
+    )
     actions = [approve_card_requests]
+    fieldsets = (
+        ('واریزی', {'fields': ('user', 'amount_toman', 'base_amount_toman', 'expires_at', 'created_at')}),
+        ('رسید کاربر', {'fields': ('receipt_text', 'receipt_preview')}),
+        ('تایید', {
+            'fields': ('status', 'approval_help', 'admin_note'),
+            'description': (
+                'برای تایید دستی، وضعیت را روی «تایید شده» بگذارید و ذخیره کنید. '
+                'کیف پول کاربر شارژ می‌شود و اگر این واریزی برای خرید یک پلن بوده، '
+                'کانفیگ ساخته و همان لحظه برای کاربر ارسال می‌شود.'
+            ),
+        }),
+        ('نتیجه', {'fields': ('auto_approved', 'created_order', 'notified_at')}),
+    )
+
+    @admin.display(description='راهنما')
+    def approval_help(self, obj):
+        if not obj or not obj.pk:
+            return '-'
+        if obj.status == CardPaymentRequest.Status.APPROVED:
+            if obj.created_order_id:
+                return format_html(
+                    'این واریزی تایید شده و کانفیگ ساخته شد: '
+                    '<a href="{}" style="text-decoration:underline;">سفارش #{}</a>',
+                    reverse('admin:sales_order_change', args=[obj.created_order_id]),
+                    obj.created_order_id,
+                )
+            return 'این واریزی تایید شده و کیف پول کاربر شارژ شده است.'
+        if obj.status == CardPaymentRequest.Status.REJECTED:
+            return 'این واریزی رد شده است.'
+        note = 'هنوز تایید نشده. وضعیت را روی «تایید شده» بگذارید و ذخیره کنید.'
+        if obj.is_expired:
+            note += ' (مهلت فاکتور تمام شده، ولی تایید دستی همچنان کار می‌کند.)'
+        return note
+
+    @admin.display(description='تصویر رسید')
+    def receipt_preview(self, obj):
+        if not obj or not obj.receipt_file_id:
+            return 'کاربر تصویری نفرستاده است.'
+        # The image lives on Telegram's servers, not here; the id is what the
+        # operator's own bot chat shows them.
+        return f'کاربر تصویر رسید فرستاده است. آن را در چت اعلان‌های ربات ببینید. (file_id: {obj.receipt_file_id[:24]}…)'
+
+    def save_model(self, request, obj, form, change):
+        """Switching the status to approved is what settles the payment."""
+        previous = None
+        if obj.pk:
+            previous = CardPaymentRequest.objects.filter(pk=obj.pk).values_list('status', flat=True).first()
+        super().save_model(request, obj, form, change)
+
+        if obj.status != CardPaymentRequest.Status.APPROVED or previous == CardPaymentRequest.Status.APPROVED:
+            return
+        # approve_request re-reads and locks the row, and refuses to credit a
+        # second time, so the save above cannot double-charge.
+        obj.status = previous or CardPaymentRequest.Status.PENDING
+        obj.save(update_fields=['status', 'updated_at'])
+        if not approve_request(obj, auto=False, note=f'تایید دستی توسط {request.user.username}'):
+            messages.warning(request, 'این واریزی از قبل تایید شده بود.')
+            return
+        obj.refresh_from_db()
+        if obj.created_order_id:
+            messages.success(request, f'واریزی تایید شد و کانفیگ سفارش #{obj.created_order_id} برای کاربر ارسال شد.')
+        elif obj.auto_purchase_after_paid and obj.pending_plan_id:
+            messages.warning(
+                request,
+                'واریزی تایید و کیف پول شارژ شد، اما ساخت کانفیگ در پنل 3x-ui ناموفق بود. '
+                'یادداشت همین صفحه دلیلش را نوشته است.',
+            )
+        else:
+            messages.success(request, f'واریزی تایید شد و کیف پول کاربر {obj.user.chat_id} شارژ شد.')
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = extra_context or {}
+        site = SiteSetting.get_solo()
+        if not site.card_auto_confirm_enabled:
+            messages.info(
+                request,
+                'تایید خودکار با پیامک بانکی خاموش است، پس واریزی‌ها را باید دستی تایید کنید: '
+                'وضعیت را روی «تایید شده» بگذارید و ذخیره بزنید، یا از «عملیات» گزینه '
+                '«تایید واریزی و ارسال کانفیگ» را انتخاب کنید.',
+            )
+        return super().changelist_view(request, extra_context)
 
     @admin.display(description='مهلت', boolean=False)
     def expiry_state(self, obj):
@@ -887,9 +949,8 @@ class CardPaymentRequestAdmin(ModelAdmin):
 
 @admin.register(BankSms)
 class BankSmsAdmin(ModelAdmin):
-    list_display = ('created_jalali', 'sender', 'parsed_amount_toman', 'matched_request', 'note')
+    list_display = ('created_at', 'sender', 'parsed_amount_toman', 'matched_request', 'note')
     list_filter = ('note',)
-    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('sender', 'raw_text', 'note')
     readonly_fields = ('sender', 'raw_text', 'parsed_amount_toman', 'matched_request', 'note', 'created_at', 'updated_at')
 
@@ -936,12 +997,12 @@ class BroadcastAdmin(ModelAdmin):
     operator decides only who receives the message and what it says.
     """
 
-    list_display = ('title', 'recipient', 'status', 'sent_count', 'failed_count', 'sent_jalali')
+    list_display = ('title', 'recipient', 'status', 'sent_count', 'failed_count', 'sent_at')
     list_filter = ('status',)
     search_fields = ('title', 'text', 'target_chat_id')
     actions = [resend_broadcasts]
     readonly_fields = (
-        'status', 'sent_count', 'failed_count', 'last_error', 'sent_jalali', 'created_jalali', 'delivery_log',
+        'status', 'sent_count', 'failed_count', 'last_error', 'sent_at', 'created_at', 'delivery_log',
     )
     fieldsets = (
         ('پیام', {
@@ -954,8 +1015,6 @@ class BroadcastAdmin(ModelAdmin):
         }),
         ('نتیجه ارسال', {'fields': ('delivery_log',)}),
     )
-    sent_jalali = jalali_column('sent_at', 'زمان ارسال', with_time=True)
-    created_jalali = jalali_column('created_at', 'تاریخ ساخت', with_time=True)
 
     @admin.display(description='گیرنده')
     def recipient(self, obj):
@@ -967,7 +1026,7 @@ class BroadcastAdmin(ModelAdmin):
             return 'بعد از ذخیره، نتیجه ارسال اینجا نوشته می‌شود.'
         rows = [f'<b>وضعیت:</b> {escape(obj.get_status_display())}']
         if obj.sent_at:
-            rows.append(f'<b>زمان ارسال:</b> {escape(jalali.format_datetime(obj.sent_at))}')
+            rows.append(f'<b>زمان ارسال:</b> {escape(str(timezone.localtime(obj.sent_at).strftime("%Y-%m-%d %H:%M")))}')
         rows.append(f'<b>ارسال موفق:</b> {obj.sent_count} — <b>ناموفق:</b> {obj.failed_count}')
         if obj.last_error:
             rows.append(f'<b>آخرین خطا:</b> {escape(obj.last_error[:500])}')

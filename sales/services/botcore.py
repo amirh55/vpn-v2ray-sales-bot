@@ -32,6 +32,12 @@ from sales.models import (
 )
 from sales.services import jalali, messaging
 from sales.services.cardpay import create_request as create_card_request
+from sales.services.clientname import (
+    PROMPT_TEXT as CLIENT_NAME_PROMPT,
+    ClientNameError,
+    resolve as resolve_client_name,
+    unique_suggestion as unique_client_name,
+)
 from sales.services.delivery import deliver_order
 from sales.services.discounts import DiscountError, resolve, validate as validate_discount
 from sales.services.linking import LinkingError, link_config, refresh_usage, usage_text
@@ -222,6 +228,50 @@ def clear_pending_discount(user: TelegramUser) -> None:
     user.save(update_fields=['temp_data', 'updated_at'])
 
 
+def pending_client_name(user: TelegramUser, plan: Plan) -> str:
+    """The config name this customer picked for this plan, if they have."""
+    data = user.temp_data or {}
+    try:
+        held_plan = int(data.get('client_name_plan_id') or 0)
+    except (TypeError, ValueError):
+        return ''
+    return str(data.get('client_name') or '') if held_plan == plan.pk else ''
+
+
+def set_pending_client_name(user: TelegramUser, plan: Plan, name: str) -> None:
+    data = dict(user.temp_data or {})
+    data['client_name_plan_id'] = plan.pk
+    data['client_name'] = name
+    user.temp_data = data
+    user.save(update_fields=['temp_data', 'updated_at'])
+
+
+def ask_client_name(bot: TeleBot, user: TelegramUser, plan: Plan, call=None, chat_id: int | None = None):
+    """Ask what the customer wants their config called, before they pay.
+
+    Asked before payment on purpose: the name goes into the panel as the
+    client's identifier, and changing it afterwards would mean recreating the
+    client. A customer who does not care taps the random button instead.
+    """
+    user.state = 'awaiting_client_name'
+    data = dict(user.temp_data or {})
+    data['name_for_plan'] = plan.pk
+    user.temp_data = data
+    user.save(update_fields=['state', 'temp_data', 'updated_at'])
+
+    rows = [
+        [('🎲 انتخاب اسم رندوم', f'rndname:{plan.pk}')],
+        [('بازگشت', f'svc:{plan.service_id}')],
+    ]
+    send_or_edit(
+        bot,
+        chat_id or (call.message.chat.id if call else user.chat_id),
+        f'📌 <b>{plan.name}</b>\n\n{CLIENT_NAME_PROMPT}',
+        inline(rows),
+        call=call,
+    )
+
+
 def plan_screen(bot: TeleBot, user: TelegramUser, plan: Plan, call=None, chat_id: int | None = None):
     """The plan's details, its prices and the payment choices.
 
@@ -231,6 +281,7 @@ def plan_screen(bot: TeleBot, user: TelegramUser, plan: Plan, call=None, chat_id
     site_now = get_site()
     user.refresh_from_db()
     discount = pending_discount(user, plan)
+    client_name = pending_client_name(user, plan)
     wallet_price = discount.price_toman if discount else int(plan.price_toman)
 
     rows = [[(f'👛 کیف پول ({toman(user.wallet_balance_toman)})', f'buy:{plan.pk}')]]
@@ -241,9 +292,13 @@ def plan_screen(bot: TeleBot, user: TelegramUser, plan: Plan, call=None, chat_id
         rows.append([('❌ حذف کد تخفیف', f'dcdel:{plan.pk}')])
     else:
         rows.append([('🎟 کد تخفیف دارم', f'dc:{plan.pk}')])
+    rows.append([('✏️ تغییر نام کانفیگ', f'rename:{plan.pk}')])
     rows.append([('بازگشت به سرویس‌ها', 'new')])
 
-    text = plan_text(plan, discount) + '\n\nروش پرداخت را انتخاب کنید:'
+    text = plan_text(plan, discount)
+    if client_name:
+        text += f'\n\n🏷 نام کانفیگ شما: <code>{client_name}</code>'
+    text += '\n\nروش پرداخت را انتخاب کنید:'
     if discount and user.wallet_balance_toman < wallet_price:
         text += '\n\nℹ️ موجودی کیف پول برای این خرید کافی نیست.'
     send_or_edit(bot, chat_id or (call.message.chat.id if call else user.chat_id), text, inline(rows), call=call)
@@ -286,6 +341,7 @@ def create_oxapay_payment(
     auto_purchase: bool = False,
     amount_usd: Decimal | None = None,
     discount=None,
+    client_name: str = '',
 ) -> Payment:
     site = get_site()
     # Plans carry their own dollar price; only wallet top-ups need converting.
@@ -302,6 +358,7 @@ def create_oxapay_payment(
         auto_purchase_after_paid=auto_purchase,
         discount_code=discount.code if discount else None,
         discount_toman=Decimal(discount.off_toman) if discount else Decimal('0'),
+        client_name=(client_name or '').strip(),
     )
     return create_invoice(payment)
 
@@ -780,6 +837,39 @@ def register_handlers(bot: TeleBot) -> None:
             )
             return
 
+        if state == 'awaiting_client_name':
+            plan = Plan.objects.select_related('service', 'service__panel').filter(
+                pk=(user.temp_data or {}).get('name_for_plan'), is_active=True
+            ).first()
+            if not plan:
+                reset_user_state(user)
+                bot.send_message(
+                    message.chat.id,
+                    'این پلن دیگر در دسترس نیست. لطفاً دوباره از فهرست سرویس‌ها انتخاب کنید.',
+                    reply_markup=main_reply_keyboard(),
+                )
+                return
+            try:
+                name = resolve_client_name(message.text or '', plan.service.panel)
+            except ClientNameError as exc:
+                bot.send_message(
+                    message.chat.id,
+                    f'⚠️ {exc}',
+                    reply_markup=inline([
+                        [('🎲 انتخاب اسم رندوم', f'rndname:{plan.pk}')],
+                        [('لغو و بازگشت', 'cancel')],
+                    ]),
+                )
+                return
+            # Only the state is cleared: the accepted name has to survive into
+            # the payment screen the customer is sent to next.
+            user.state = ''
+            user.save(update_fields=['state', 'updated_at'])
+            set_pending_client_name(user, plan, name)
+            bot.send_message(message.chat.id, f'✅ نام کانفیگ شما: <code>{name}</code>')
+            plan_screen(bot, user, plan, chat_id=message.chat.id)
+            return
+
         if state == 'awaiting_discount_code':
             plan = Plan.objects.select_related('service').filter(
                 pk=(user.temp_data or {}).get('discount_for_plan'), is_active=True
@@ -912,8 +1002,29 @@ def register_handlers(bot: TeleBot) -> None:
 
         if data.startswith('plan:'):
             plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
+            # The config name comes first: it is part of what is being bought,
+            # and asking after payment would mean recreating the client.
+            if not pending_client_name(user, plan):
+                ask_client_name(bot, user, plan, call=call)
+                return
             # Wallet is always offered: when the balance falls short the
             # handler explains by how much and offers to top up.
+            plan_screen(bot, user, plan, call=call)
+            return
+
+        if data.startswith('rename:'):
+            plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
+            ask_client_name(bot, user, plan, call=call)
+            return
+
+        if data.startswith('rndname:'):
+            plan = Plan.objects.select_related('service', 'service__panel').get(
+                pk=int(data.split(':')[1]), is_active=True
+            )
+            name = unique_client_name(user, plan.service.panel)
+            user.state = ''
+            user.save(update_fields=['state', 'updated_at'])
+            set_pending_client_name(user, plan, name)
             plan_screen(bot, user, plan, call=call)
             return
 
@@ -941,6 +1052,7 @@ def register_handlers(bot: TeleBot) -> None:
         if data.startswith('cryptobuy:'):
             plan = Plan.objects.select_related('service').get(pk=int(data.split(':')[1]), is_active=True)
             discount = pending_discount(user, plan)
+            client_name = pending_client_name(user, plan)
             price_usd = discount.price_usd if discount else Decimal(plan.price_usd)
             price_toman = discount.price_toman if discount else int(plan.price_toman)
             try:
@@ -954,6 +1066,7 @@ def register_handlers(bot: TeleBot) -> None:
                     pending_plan=plan,
                     auto_purchase=True,
                     discount=discount,
+                    client_name=client_name,
                 )
                 text = (
                     f'🪙 پرداخت کریپتو برای <b>{plan.name}</b>\n\n'
@@ -976,8 +1089,9 @@ def register_handlers(bot: TeleBot) -> None:
                 edit_or_send(bot, call, 'کارت‌به‌کارت فعلاً غیرفعال است.', home_inline_keyboard())
                 return
             discount = pending_discount(user, plan)
+            client_name = pending_client_name(user, plan)
             price = discount.price_toman if discount else int(plan.price_toman)
-            req = create_card_request(user, int(price), plan=plan, discount=discount)
+            req = create_card_request(user, int(price), plan=plan, discount=discount, client_name=client_name)
             user.state = 'awaiting_card_receipt'
             # The invoice replaces the code: it is recorded on the request row
             # and applied when the transfer is confirmed.
@@ -1004,10 +1118,13 @@ def register_handlers(bot: TeleBot) -> None:
                 return
             order = None
             try:
-                order = create_order_from_wallet(user, plan, discount=discount)
+                order = create_order_from_wallet(
+                    user, plan, discount=discount, client_name=pending_client_name(user, plan)
+                )
                 order = provision_order(order)
-                if discount:
-                    clear_pending_discount(user)
+                # The name and code belong to a purchase that is now done; a
+                # second buy has to pick its own, since names cannot repeat.
+                reset_user_state(user)
                 send_delivery(bot, call.message.chat.id, order)
             except Exception as exc:  # noqa: BLE001
                 if order:
@@ -1022,7 +1139,10 @@ def register_handlers(bot: TeleBot) -> None:
             user.refresh_from_db()
             need = int(max(Decimal('0'), price - user.wallet_balance_toman))
             try:
-                payment = create_oxapay_payment(user, need, pending_plan=plan, auto_purchase=True, discount=discount)
+                payment = create_oxapay_payment(
+                    user, need, pending_plan=plan, auto_purchase=True, discount=discount,
+                    client_name=pending_client_name(user, plan),
+                )
                 text = f'برای شارژ کیف پول و خرید خودکار این پلن، پرداخت را انجام دهید:\nمبلغ: {toman(need)}\n{payment.payment_url}'
                 edit_or_send(bot, call, text, home_inline_keyboard())
             except OxaPayError as exc:

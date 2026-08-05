@@ -57,7 +57,9 @@ def settle_payment(payment: Payment, note: str = '') -> bool:
             # customer was paying; resolve() returns None in that case and the
             # purchase goes through at the plan's own price.
             discount = resolve(locked.discount_code_id, user, plan)
-            order = provision_order(create_order_from_wallet(user, plan, discount=discount))
+            order = provision_order(
+                create_order_from_wallet(user, plan, discount=discount, client_name=locked.client_name)
+            )
         except Exception as exc:  # noqa: BLE001
             send_text(
                 user.chat_id,

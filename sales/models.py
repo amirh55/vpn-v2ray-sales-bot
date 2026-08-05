@@ -494,6 +494,7 @@ class Payment(TimeStampedModel):
         related_name='payments',
     )
     discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
+    client_name = models.CharField('نام کاربری انتخاب‌شده برای کانفیگ', max_length=64, blank=True)
     raw_payload = models.JSONField('Payload خام', default=dict, blank=True)
 
     class Meta:
@@ -563,6 +564,7 @@ class CardPaymentRequest(TimeStampedModel):
         related_name='card_requests',
     )
     discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
+    client_name = models.CharField('نام کاربری انتخاب‌شده برای کانفیگ', max_length=64, blank=True)
     created_order = models.ForeignKey(
         'Order',
         verbose_name='سفارش ساخته‌شده',
