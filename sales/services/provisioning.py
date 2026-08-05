@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.db import transaction
 
 from sales.models import Order, Plan, Service, TelegramUser, WalletTransaction
+from sales.services.discounts import redeem
 from sales.services.qrcode_util import make_qr_content_file
 from sales.services.xui import XUIClient, XUIError
 
@@ -77,8 +78,21 @@ def build_client_payload(order: Order, client_uuid: str, client_email: str, expi
 
 
 @transaction.atomic
-def create_order_from_wallet(user: TelegramUser, plan: Plan) -> Order:
-    price = Decimal(plan.price_toman)
+def create_order_from_wallet(
+    user: TelegramUser,
+    plan: Plan,
+    *,
+    discount=None,
+) -> Order:
+    """Charge the wallet and open the order.
+
+    `discount` is a DiscountQuote. Passing one charges its discounted price and
+    records the redemption in the same transaction as the wallet debit, so a
+    code can never be counted as used without the customer being charged the
+    lower price.
+    """
+    price = Decimal(discount.price_toman) if discount else Decimal(plan.price_toman)
+    price_usd = discount.price_usd if discount else plan.price_usd
     user = TelegramUser.objects.select_for_update().get(pk=user.pk)
     if user.wallet_balance_toman < price:
         raise ValueError('موجودی کیف پول کافی نیست.')
@@ -88,21 +102,34 @@ def create_order_from_wallet(user: TelegramUser, plan: Plan) -> Order:
         plan=plan,
         source=Order.Source.WALLET,
         status=Order.Status.PAID,
-        amount_usd=plan.price_usd,
+        amount_usd=price_usd,
         amount_toman=price,
         traffic_bytes=gb_to_bytes(plan.traffic_gb),
         user_limit=plan.user_limit,
+        discount_code=discount.code if discount else None,
+        discount_toman=Decimal(discount.off_toman) if discount else Decimal('0'),
     )
     user.wallet_balance_toman -= price
     user.save(update_fields=['wallet_balance_toman', 'updated_at'])
+    description = f'خرید پلن {plan.name}'
+    if discount:
+        description += f' با کد {discount.code.code}'
     WalletTransaction.objects.create(
         user=user,
         kind=WalletTransaction.Kind.DEBIT,
         amount_toman=price,
         balance_after_toman=user.wallet_balance_toman,
         order=order,
-        description=f'خرید پلن {plan.name}',
+        description=description,
     )
+    if discount:
+        redeem(
+            discount.code,
+            user,
+            order=order,
+            off_toman=discount.off_toman,
+            off_usd=discount.off_usd,
+        )
     return order
 
 

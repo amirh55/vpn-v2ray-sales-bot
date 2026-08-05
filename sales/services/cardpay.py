@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from sales.models import BankSms, CardPaymentRequest, SiteSetting, TelegramUser, WalletTransaction
 from sales.services.delivery import send_order, send_text
+from sales.services.discounts import resolve
 from sales.services.provisioning import create_order_from_wallet, provision_order
 from sales.services.banksms import (
     extract_amounts_toman,
@@ -28,11 +29,13 @@ def get_or_create_sms_secret() -> str:
     return site.sms_webhook_secret
 
 
-def create_request(user: TelegramUser, base_amount_toman: int, plan=None) -> CardPaymentRequest:
+def create_request(user: TelegramUser, base_amount_toman: int, plan=None, discount=None) -> CardPaymentRequest:
     """Open an invoice for a distinctive figure, valid for a limited window.
 
     Passing a plan turns this into a purchase: the service is delivered as soon
-    as the transfer is confirmed, instead of only topping up the wallet.
+    as the transfer is confirmed, instead of only topping up the wallet. A
+    DiscountQuote is remembered on the row so the same code still applies when
+    the transfer lands, possibly hours later.
     """
     site = SiteSetting.get_solo()
     minutes = int(site.card_invoice_minutes or 30)
@@ -44,6 +47,8 @@ def create_request(user: TelegramUser, base_amount_toman: int, plan=None) -> Car
         expires_at=timezone.now() + timedelta(minutes=minutes),
         pending_plan=plan,
         auto_purchase_after_paid=bool(plan),
+        discount_code=discount.code if discount else None,
+        discount_toman=Decimal(discount.off_toman) if discount else Decimal('0'),
     )
 
 
@@ -81,7 +86,10 @@ def approve_request(request: CardPaymentRequest, *, auto: bool, note: str = '') 
     # customer can spend it, rather than rolling back a confirmed payment.
     if locked.auto_purchase_after_paid and locked.pending_plan_id and not locked.created_order_id:
         try:
-            order = create_order_from_wallet(locked.user, locked.pending_plan)
+            # Re-checked rather than trusted: a transfer can land after the code
+            # has expired, and resolve() returns None then.
+            discount = resolve(locked.discount_code_id, locked.user, locked.pending_plan)
+            order = create_order_from_wallet(locked.user, locked.pending_plan, discount=discount)
             order = provision_order(order)
             locked.created_order = order
             locked.save(update_fields=['created_order', 'updated_at'])

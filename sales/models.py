@@ -83,6 +83,31 @@ class SiteSetting(TimeStampedModel):
         help_text='با کاما جدا کنید، مثل: 200080,7575,9830000. خالی یعنی هر فرستنده‌ای پذیرفته می‌شود.',
     )
 
+    # Webhook mode needs a domain with a working certificate, so it stays off
+    # until the operator turns it on. Polling is what a fresh install uses.
+    telegram_use_webhook = models.BooleanField(
+        'دریافت پیام‌ها با Webhook به‌جای Polling',
+        default=False,
+        help_text='فقط وقتی روشن کنید که دامنه و SSL تنظیم شده باشد. بعد از روشن کردن، روی سرور «vpnshop webhook» را بزنید.',
+    )
+    telegram_webhook_secret = models.CharField(
+        'کلید مخفی وبهوک تلگرام',
+        max_length=120,
+        blank=True,
+        help_text='خالی بگذارید تا خودکار ساخته شود. در آدرس وبهوک و هدر امنیتی تلگرام استفاده می‌شود.',
+    )
+
+    daily_report_enabled = models.BooleanField(
+        'ارسال گزارش فروش به مدیر',
+        default=False,
+        help_text='گزارش روزانه و گزارش ماهانه به «چت آیدی مدیر» فرستاده می‌شود.',
+    )
+    daily_report_hour = models.PositiveSmallIntegerField(
+        'ساعت ارسال گزارش روزانه',
+        default=23,
+        help_text='عدد ۰ تا ۲۳ به وقت سرور. گزارش ماهانه هم در همین ساعتِ روز اول ماه فرستاده می‌شود.',
+    )
+
     tutorial_text = models.TextField('متن آموزش اتصال', blank=True, default='آموزش اتصال را از این بخش تنظیم کنید.')
     contact_intro_text = models.TextField('متن بخش ارتباط با ما', blank=True, default='پیام خود را ارسال کنید. پشتیبانی پاسخ شما را بررسی می‌کند.')
     faq_intro_text = models.TextField(
@@ -101,13 +126,21 @@ class SiteSetting(TimeStampedModel):
         return self.title
 
     def save(self, *args, **kwargs):
-        # The operator never needs to invent this; an empty field means
-        # "generate one", which is what the field's help text promises.
+        # The operator never needs to invent these; an empty field means
+        # "generate one", which is what the fields' help text promises.
+        generated = []
         if not self.sms_webhook_secret:
             self.sms_webhook_secret = secrets.token_urlsafe(24)
-            update_fields = kwargs.get('update_fields')
-            if update_fields is not None and 'sms_webhook_secret' not in update_fields:
-                kwargs['update_fields'] = list(update_fields) + ['sms_webhook_secret']
+            generated.append('sms_webhook_secret')
+        if not self.telegram_webhook_secret:
+            # Telegram only accepts A-Z a-z 0-9 _ - in the secret header.
+            self.telegram_webhook_secret = secrets.token_urlsafe(24).replace('=', '')
+            generated.append('telegram_webhook_secret')
+        update_fields = kwargs.get('update_fields')
+        if generated and update_fields is not None:
+            missing = [name for name in generated if name not in update_fields]
+            if missing:
+                kwargs['update_fields'] = list(update_fields) + missing
         super().save(*args, **kwargs)
 
     @classmethod
@@ -125,6 +158,14 @@ class XUIPanel(TimeStampedModel):
     api_base_path = models.CharField('مسیر پایه API', max_length=120, default='/panel/api')
     subscription_base_url = models.URLField('آدرس پایه Subscription، اختیاری', blank=True)
     is_active = models.BooleanField('فعال', default=True)
+
+    # Read from the panel's own openapi.json so payloads match this exact build
+    # instead of being guessed. Empty means "not read yet"; delivery then falls
+    # back to trying the known shapes one by one.
+    openapi_schema = models.JSONField('ساختار API خوانده‌شده از پنل', default=dict, blank=True)
+    openapi_fetched_at = models.DateTimeField('زمان خواندن ساختار API', null=True, blank=True)
+    openapi_add_client_path = models.CharField('مسیر ساخت کلاینت در این پنل', max_length=200, blank=True)
+    openapi_note = models.CharField('نتیجه آخرین خواندن ساختار API', max_length=300, blank=True)
 
     class Meta:
         verbose_name = 'پنل سنایی / 3x-ui'
@@ -202,6 +243,120 @@ class Plan(TimeStampedModel):
         return int(round(self.crypto_saving_toman() * 100 / base))
 
 
+class DiscountCode(TimeStampedModel):
+    """A coupon the customer types in before choosing how to pay.
+
+    This is not the crypto saving shown on every plan: that one is automatic and
+    comes from the plan's own dollar price. This is a code the operator hands out
+    for a campaign or to a returning customer.
+    """
+
+    class Kind(models.TextChoices):
+        PERCENT = 'percent', 'درصدی'
+        FIXED = 'fixed', 'مبلغ ثابت تومانی'
+
+    code = models.CharField(
+        'کد تخفیف',
+        max_length=40,
+        unique=True,
+        help_text='حروف انگلیسی و عدد. بدون فاصله. مثل NOWRUZ40',
+    )
+    title = models.CharField('عنوان داخلی', max_length=150, blank=True)
+    kind = models.CharField('نوع تخفیف', max_length=20, choices=Kind.choices, default=Kind.PERCENT)
+    percent = models.PositiveSmallIntegerField('درصد تخفیف', default=0, help_text='برای نوع درصدی. عدد ۱ تا ۱۰۰.')
+    amount_toman = models.DecimalField(
+        'مبلغ تخفیف / تومان',
+        max_digits=18,
+        decimal_places=0,
+        default=Decimal('0'),
+        help_text='برای نوع مبلغ ثابت.',
+    )
+    max_discount_toman = models.DecimalField(
+        'سقف تخفیف / تومان',
+        max_digits=18,
+        decimal_places=0,
+        default=Decimal('0'),
+        help_text='برای تخفیف درصدی. ۰ یعنی بدون سقف.',
+    )
+    min_order_toman = models.DecimalField(
+        'حداقل مبلغ خرید / تومان',
+        max_digits=18,
+        decimal_places=0,
+        default=Decimal('0'),
+        help_text='۰ یعنی محدودیتی ندارد.',
+    )
+
+    valid_from = models.DateTimeField('شروع اعتبار', null=True, blank=True)
+    valid_until = models.DateTimeField('پایان اعتبار', null=True, blank=True)
+    max_uses = models.PositiveIntegerField('حداکثر دفعات استفاده در کل', default=0, help_text='۰ یعنی نامحدود.')
+    max_uses_per_user = models.PositiveIntegerField('حداکثر دفعات برای هر کاربر', default=1, help_text='۰ یعنی نامحدود.')
+    used_count = models.PositiveIntegerField('تعداد استفاده‌شده', default=0)
+
+    services = models.ManyToManyField(
+        Service,
+        verbose_name='فقط برای این سرویس‌ها',
+        blank=True,
+        help_text='خالی یعنی برای همه سرویس‌ها.',
+    )
+    plans = models.ManyToManyField(
+        Plan,
+        verbose_name='فقط برای این پلن‌ها',
+        blank=True,
+        help_text='خالی یعنی برای همه پلن‌ها.',
+    )
+    is_active = models.BooleanField('فعال', default=True)
+    note = models.TextField('یادداشت مدیر', blank=True)
+
+    class Meta:
+        verbose_name = 'کد تخفیف'
+        verbose_name_plural = 'کدهای تخفیف'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return self.code
+
+    def save(self, *args, **kwargs):
+        self.code = (self.code or '').strip().upper()
+        super().save(*args, **kwargs)
+
+    @property
+    def remaining_uses(self) -> int | None:
+        """How many uses are left in total, or None when unlimited."""
+        if not self.max_uses:
+            return None
+        return max(0, self.max_uses - self.used_count)
+
+    def value_text(self) -> str:
+        if self.kind == self.Kind.PERCENT:
+            text = f'{self.percent}٪'
+            if self.max_discount_toman:
+                text += f' تا سقف {int(self.max_discount_toman):,} تومان'
+            return text
+        return f'{int(self.amount_toman):,} تومان'
+
+
+class DiscountRedemption(TimeStampedModel):
+    """One accepted use of a code, written when the order is created.
+
+    Kept even after a refund so the history stays honest, which is also what
+    the per-user limit counts.
+    """
+
+    code = models.ForeignKey(DiscountCode, verbose_name='کد تخفیف', on_delete=models.CASCADE, related_name='redemptions')
+    user = models.ForeignKey('TelegramUser', verbose_name='کاربر', on_delete=models.CASCADE, related_name='discount_redemptions')
+    order = models.ForeignKey('Order', verbose_name='سفارش', on_delete=models.SET_NULL, null=True, blank=True, related_name='discount_redemptions')
+    amount_toman = models.DecimalField('مبلغ تخفیف / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
+    amount_usd = models.DecimalField('مبلغ تخفیف / دلار', max_digits=10, decimal_places=2, default=Decimal('0'))
+
+    class Meta:
+        verbose_name = 'استفاده از کد تخفیف'
+        verbose_name_plural = 'استفاده‌های کد تخفیف'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.code.code} / {self.user.chat_id}'
+
+
 class TelegramUser(TimeStampedModel):
     chat_id = models.BigIntegerField('Chat ID', unique=True)
     username = models.CharField('Username', max_length=150, blank=True)
@@ -251,6 +406,17 @@ class Order(TimeStampedModel):
     config_link = models.TextField('لینک کانفیگ', blank=True)
     subscription_link = models.TextField('لینک Subscription', blank=True)
     qr_image = models.ImageField('QR Code', upload_to='qrcodes/', blank=True)
+    # amount_toman is what the customer actually paid; these record what the
+    # code took off, so reports can separate revenue from discount given away.
+    discount_code = models.ForeignKey(
+        DiscountCode,
+        verbose_name='کد تخفیف',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orders',
+    )
+    discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
     admin_note = models.TextField('یادداشت مدیر', blank=True)
 
     class Meta:
@@ -317,6 +483,17 @@ class Payment(TimeStampedModel):
     track_id = models.CharField('Track ID درگاه', max_length=120, blank=True, db_index=True)
     pending_plan = models.ForeignKey(Plan, verbose_name='پلن قابل خرید بعد از شارژ', on_delete=models.SET_NULL, null=True, blank=True)
     auto_purchase_after_paid = models.BooleanField('بعد از پرداخت خودکار خرید انجام شود', default=False)
+    # Carried here so the discount survives the round trip to the gateway: the
+    # order is only created once the callback arrives.
+    discount_code = models.ForeignKey(
+        DiscountCode,
+        verbose_name='کد تخفیف',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+    )
+    discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
     raw_payload = models.JSONField('Payload خام', default=dict, blank=True)
 
     class Meta:
@@ -370,6 +547,15 @@ class CardPaymentRequest(TimeStampedModel):
         blank=True,
     )
     auto_purchase_after_paid = models.BooleanField('بعد از تایید، سرویس خودکار ساخته شود', default=False)
+    discount_code = models.ForeignKey(
+        DiscountCode,
+        verbose_name='کد تخفیف',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='card_requests',
+    )
+    discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
     created_order = models.ForeignKey(
         'Order',
         verbose_name='سفارش ساخته‌شده',
@@ -486,6 +672,9 @@ class Broadcast(TimeStampedModel):
     class Status(models.TextChoices):
         DRAFT = 'draft', 'پیش‌نویس'
         QUEUED = 'queued', 'در صف ارسال'
+        # Claimed by one sender. Exists so a second process cannot pick up a
+        # broadcast that is already going out.
+        SENDING = 'sending', 'در حال ارسال'
         SENT = 'sent', 'ارسال شده'
         FAILED = 'failed', 'ناموفق'
 

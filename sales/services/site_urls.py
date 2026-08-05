@@ -44,6 +44,18 @@ def sms_webhook_url() -> str:
     return f'{public_base_url()}/api/payments/sms/webhook/?secret={site.sms_webhook_secret}'
 
 
+def telegram_webhook_url() -> str:
+    """Where Telegram posts updates.
+
+    The secret sits in the path as well as in the header Telegram sends, so a
+    scanner that finds the host still cannot reach the handler.
+    """
+    site = SiteSetting.get_solo()
+    if not site.telegram_webhook_secret:
+        return ''
+    return f'{public_base_url()}/api/telegram/{site.telegram_webhook_secret}/'
+
+
 def certificate_expiry(cert_path: str) -> datetime | None:
     """Read the certificate's expiry with openssl, if it is available."""
     try:

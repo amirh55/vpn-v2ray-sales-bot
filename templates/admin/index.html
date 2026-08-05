@@ -21,6 +21,16 @@
     </div>
     {% endif %}
 
+    {% if report_url %}
+    <div class="mb-8">
+        <a href="{{ report_url }}"
+           class="bg-primary-600 font-medium inline-flex items-center gap-2 px-4 py-2 rounded-default text-white hover:bg-primary-700">
+            <span class="material-symbols-outlined text-sm!">bar_chart</span>
+            گزارش فروش روزانه و ماهانه
+        </a>
+    </div>
+    {% endif %}
+
     <div class="flex flex-col lg:flex-row lg:gap-8">
         <div class="grow">
             {% include "unfold/helpers/app_list_default.html" %}

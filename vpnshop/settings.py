@@ -165,6 +165,16 @@ UNFOLD = {
                         'icon': 'shopping_cart',
                         'link': reverse_lazy('admin:sales_order_changelist'),
                     },
+                    {
+                        'title': _('کدهای تخفیف'),
+                        'icon': 'local_offer',
+                        'link': reverse_lazy('admin:sales_discountcode_changelist'),
+                    },
+                    {
+                        'title': _('گزارش فروش'),
+                        'icon': 'bar_chart',
+                        'link': reverse_lazy('admin:sales_report'),
+                    },
                 ],
             },
             {

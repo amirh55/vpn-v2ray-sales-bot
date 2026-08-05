@@ -45,6 +45,21 @@ class XUIClient:
             path = '/' + path
         return f'{self.base_url}{self.api_base_path}{path}'
 
+    def _schema_url(self, path: str) -> str:
+        """Turn a path out of the OpenAPI document into a full URL.
+
+        Most panels list paths from the panel root ("/panel/api/clients/add"),
+        but some list them relative to the API base ("/clients/add"), which
+        needs that base put back.
+        """
+        if path.startswith('http'):
+            return path
+        if not path.startswith('/'):
+            path = '/' + path
+        if path.startswith(self.api_base_path):
+            return self._url(path)
+        return self._api_url(path)
+
     def _panel_url(self, path: str) -> str:
         """Build non-OpenAPI panel route for older 3x-ui/x-ui builds."""
         if not path.startswith('/'):
@@ -107,7 +122,240 @@ class XUIClient:
         return ''
 
     def get_openapi(self) -> dict[str, Any]:
-        return self.request('GET', self._api_url('/openapi.json'))
+        """Fetch the panel's own API description.
+
+        Newer 3x-ui builds publish one, and it is the only way to know what this
+        exact build expects without guessing. Several locations are tried
+        because forks moved the file around.
+        """
+        last_error = None
+        for url in (
+            self._api_url('/openapi.json'),
+            self._panel_url('/openapi.json'),
+            self._url('/openapi.json'),
+            self._api_url('/swagger/doc.json'),
+        ):
+            try:
+                result = self.request('GET', url)
+            except XUIError as exc:
+                last_error = exc
+                continue
+            if isinstance(result, dict) and result.get('paths'):
+                result['_source_url'] = url
+                return result
+            last_error = XUIError(f'{url} پاسخ داد اما ساختار OpenAPI نداشت.')
+        raise XUIError(f'فایل openapi.json در این پنل پیدا نشد: {last_error}')
+
+    # --- Schema-driven client creation ------------------------------------
+    #
+    # Without a schema this client has to try each known endpoint and payload
+    # shape until one works, which costs a round trip per failed guess and
+    # breaks whenever a new 3x-ui version appears. With the schema in hand the
+    # right endpoint is known up front and the payload is built from the panel's
+    # own field list. The guessing path stays as the fallback for older builds
+    # that publish no schema.
+
+    ADD_CLIENT_HINTS = ('client', 'user')
+
+    @staticmethod
+    def _schema_paths(schema: dict[str, Any]) -> dict[str, Any]:
+        paths = schema.get('paths')
+        return paths if isinstance(paths, dict) else {}
+
+    @classmethod
+    def find_add_client_path(cls, schema: dict[str, Any]) -> str:
+        """Pick the endpoint in the schema that creates a client.
+
+        Ranked rather than filtered, because a panel may expose several
+        candidates (`/clients/add`, `/clients/bulkCreate`, `/inbounds/addClient`)
+        and the plain single-client one is always the right first choice.
+        """
+        best = ''
+        best_score = -1
+        for raw_path, methods in cls._schema_paths(schema).items():
+            if not isinstance(methods, dict) or 'post' not in methods:
+                continue
+            lowered = str(raw_path).lower()
+            if '{' in lowered:
+                continue
+            if not any(hint in lowered for hint in cls.ADD_CLIENT_HINTS):
+                continue
+
+            score = -1
+            if lowered.endswith('/clients/add'):
+                score = 100
+            elif lowered.endswith('/addclient'):
+                score = 90
+            elif lowered.endswith('/clients'):
+                score = 70
+            elif lowered.endswith('/client/add'):
+                score = 80
+            elif 'bulkcreate' in lowered or 'bulk' in lowered:
+                score = 40
+            if score > best_score:
+                best_score, best = score, str(raw_path)
+        return best
+
+    def _schema_body_properties(self, schema: dict[str, Any], path: str) -> dict[str, Any]:
+        """Resolve the POST body schema of one path into a property map."""
+        operation = self._schema_paths(schema).get(path, {}).get('post', {})
+        body = operation.get('requestBody') or {}
+        content = body.get('content') or {}
+        media = content.get('application/json') or next(iter(content.values()), {})
+        resolved = self._resolve_ref(schema, media.get('schema') or {})
+        props = resolved.get('properties')
+        return props if isinstance(props, dict) else {}
+
+    @classmethod
+    def _resolve_ref(cls, schema: dict[str, Any], node: Any, depth: int = 0) -> dict[str, Any]:
+        """Follow a local $ref. Depth-capped so a self-referencing schema cannot loop."""
+        if not isinstance(node, dict) or depth > 8:
+            return node if isinstance(node, dict) else {}
+        ref = node.get('$ref')
+        if not isinstance(ref, str) or not ref.startswith('#/'):
+            return node
+        target: Any = schema
+        for part in ref[2:].split('/'):
+            if not isinstance(target, dict):
+                return {}
+            target = target.get(part.replace('~1', '/').replace('~0', '~'))
+            if target is None:
+                return {}
+        return cls._resolve_ref(schema, target, depth + 1)
+
+    def _payload_from_schema(
+        self,
+        schema: dict[str, Any],
+        path: str,
+        inbound_id: int,
+        client_payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Shape the request body to match what this panel's schema declares.
+
+        Returns None when the schema describes something this code does not
+        recognise, so the caller falls back to the known shapes rather than
+        posting a body built on a wrong guess.
+        """
+        props = self._schema_body_properties(schema, path)
+        if not props:
+            return None
+
+        keys = {str(k): k for k in props}
+        lowered = {k.lower(): original for k, original in keys.items()}
+
+        client_key = lowered.get('client')
+        inbound_key = (
+            lowered.get('inboundids')
+            or lowered.get('inbound_ids')
+            or lowered.get('inbounds')
+            or lowered.get('inboundid')
+            or lowered.get('inbound_id')
+            or lowered.get('id')
+        )
+
+        if client_key:
+            # 3.x shape: {"client": {...}, "inboundIds": [n]}
+            client = self._client_v3_payloads(inbound_id, client_payload)[0]['client']
+            body: dict[str, Any] = {keys[client_key]: client}
+            if inbound_key:
+                target = keys[inbound_key]
+                declared = self._resolve_ref(schema, props.get(target) or {})
+                body[target] = (
+                    [int(inbound_id)] if str(declared.get('type')) == 'array' else int(inbound_id)
+                )
+            return body
+
+        if 'settings' in lowered:
+            # 2.x shape: {"id": inbound, "settings": "<json string>"}
+            settings_json = json.dumps(
+                {'clients': [client_payload]}, ensure_ascii=False, separators=(',', ':')
+            )
+            body = {keys[lowered['settings']]: settings_json}
+            if inbound_key:
+                body[keys[inbound_key]] = int(inbound_id)
+            return body
+
+        return None
+
+    def load_schema(self, *, refresh: bool = False) -> dict[str, Any]:
+        """The cached schema, fetched from the panel the first time it is needed.
+
+        Cached on the panel row rather than in memory so every process — the
+        bot, the web workers, a management command — shares one copy and the
+        panel is not re-queried on each sale. A panel that turned out to have no
+        schema is remembered as such by the fetch timestamp, so it is not probed
+        again on every order.
+        """
+        if refresh:
+            return self.refresh_schema()
+        cached = self.panel.openapi_schema
+        if isinstance(cached, dict) and cached:
+            return cached
+        if self.panel.openapi_fetched_at is None:
+            try:
+                return self.refresh_schema()
+            except XUIError:
+                return {}
+        return {}
+
+    def refresh_schema(self) -> dict[str, Any]:
+        """Re-read the schema from the panel and remember what it says.
+
+        The failure note is stored too, so the panel page can explain why a
+        panel is still running on the fallback path.
+        """
+        from django.utils import timezone
+
+        try:
+            schema = self.get_openapi()
+        except XUIError as exc:
+            self.panel.openapi_note = str(exc)[:300]
+            self.panel.openapi_fetched_at = timezone.now()
+            self.panel.save(update_fields=['openapi_note', 'openapi_fetched_at', 'updated_at'])
+            raise
+
+        path = self.find_add_client_path(schema)
+        self.panel.openapi_schema = schema
+        self.panel.openapi_add_client_path = path
+        self.panel.openapi_fetched_at = timezone.now()
+        self.panel.openapi_note = (
+            f'خوانده شد. مسیر ساخت کلاینت: {path}' if path
+            else 'خوانده شد، اما مسیر ساخت کلاینت در آن پیدا نشد.'
+        )
+        self.panel.save(update_fields=[
+            'openapi_schema', 'openapi_add_client_path', 'openapi_fetched_at', 'openapi_note', 'updated_at',
+        ])
+        return schema
+
+    def _add_client_from_schema(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
+        """Create the client using the endpoint and body the panel documents."""
+        schema = self.load_schema()
+        if not schema:
+            raise XUIError('ساختار API این پنل خوانده نشده است.')
+        path = self.panel.openapi_add_client_path or self.find_add_client_path(schema)
+        if not path:
+            raise XUIError('مسیر ساخت کلاینت در ساختار API این پنل پیدا نشد.')
+
+        body = self._payload_from_schema(schema, path, inbound_id, client_payload)
+        if body is None:
+            raise XUIError(f'ساختار بدنه‌ی {path} شناخته‌شده نیست.')
+
+        email = str(client_payload['email']).strip()
+        result = self.request(
+            'POST', self._schema_url(path), json=body, headers={'Content-Type': 'application/json'}
+        )
+        if not self._ok(result):
+            raise XUIError(f'POST {path}: {result}')
+
+        try:
+            uuid_value = self._extract_uuid(self.get_client(email))
+        except XUIError:
+            uuid_value = self._extract_uuid(result)
+        if uuid_value:
+            result['client_uuid'] = uuid_value
+        result['client_email'] = email
+        result['api_mode'] = f'openapi:{path}'
+        return result
 
     def list_inbounds(self) -> dict[str, Any]:
         last_error = None
@@ -400,6 +648,14 @@ class XUIClient:
                 client_payload[int_key] = 0
 
         errors: list[str] = []
+        # The panel's own schema is the only source that is right by
+        # construction, so it goes first. Everything after it is a guess kept
+        # for panels that publish no schema.
+        try:
+            return self._add_client_from_schema(inbound_id, client_payload)
+        except XUIError as exc:
+            errors.append(f'openapi: {exc}')
+
         # Prefer 3.x global client API because current 3x-ui versions moved user
         # management to /panel/api/clients and attach clients to inbounds.
         try:

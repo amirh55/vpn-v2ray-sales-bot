@@ -10,6 +10,7 @@ from sales.models import Payment, SiteSetting
 from sales.services.cardpay import process_incoming_sms
 from sales.services.oxapay import validate_webhook_signature
 from sales.services.payments import settle_payment
+from sales.services.telegram_webhook import handle_update
 
 
 # Field names used by the various Android SMS forwarder apps.
@@ -71,6 +72,46 @@ def sms_webhook(request):
         'matched': bool(sms.matched_request_id),
         'note': sms.note,
     })
+
+
+@csrf_exempt
+def telegram_webhook(request, secret: str):
+    """Receive one Telegram update.
+
+    Two checks, both compared in constant time: the secret in the path, and the
+    header Telegram attaches to every request it sends. Either one failing means
+    this did not come from Telegram, and the answer is a flat 403.
+    """
+    site = SiteSetting.get_solo()
+    expected = (site.telegram_webhook_secret or '').strip()
+    if not expected:
+        return HttpResponseForbidden('telegram webhook is not configured')
+    if not hmac.compare_digest(secret or '', expected):
+        return HttpResponseForbidden('bad secret')
+
+    header = (request.headers.get('X-Telegram-Bot-Api-Secret-Token') or '').strip()
+    if not hmac.compare_digest(header, expected):
+        return HttpResponseForbidden('bad secret token header')
+
+    if request.method != 'POST':
+        return HttpResponseBadRequest('POST required')
+    if not site.telegram_use_webhook:
+        # Refusing rather than handling: with polling switched back on, both
+        # transports would otherwise answer the same customer twice.
+        return HttpResponse('webhook mode is off', content_type='text/plain')
+
+    try:
+        payload = json.loads(request.body.decode('utf-8'))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return HttpResponseBadRequest('bad json')
+
+    try:
+        handle_update(payload)
+    except Exception as exc:  # noqa: BLE001
+        # Telegram retries anything that is not a 2xx, which would replay a
+        # failing update forever. The failure is logged and acknowledged.
+        print(f'خطا در پردازش آپدیت تلگرام: {exc}', flush=True)
+    return HttpResponse('ok', content_type='text/plain')
 
 
 @csrf_exempt

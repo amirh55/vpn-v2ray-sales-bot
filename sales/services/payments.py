@@ -13,6 +13,7 @@ from django.db import transaction
 
 from sales.models import Payment, Plan, TelegramUser, WalletTransaction
 from sales.services.delivery import send_order, send_text
+from sales.services.discounts import resolve
 from sales.services.formatting import toman
 from sales.services.provisioning import create_order_from_wallet, provision_order
 
@@ -51,7 +52,12 @@ def settle_payment(payment: Payment, note: str = '') -> bool:
     if locked.auto_purchase_after_paid and locked.pending_plan_id:
         try:
             plan = Plan.objects.get(pk=locked.pending_plan_id)
-            order = provision_order(create_order_from_wallet(user, plan))
+            # The code was accepted before the gateway redirect. It is checked
+            # again here because it may have expired or run out while the
+            # customer was paying; resolve() returns None in that case and the
+            # purchase goes through at the plan's own price.
+            discount = resolve(locked.discount_code_id, user, plan)
+            order = provision_order(create_order_from_wallet(user, plan, discount=discount))
         except Exception as exc:  # noqa: BLE001
             send_text(
                 user.chat_id,

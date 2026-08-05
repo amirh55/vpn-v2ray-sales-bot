@@ -146,6 +146,36 @@ cmd_domain() {
   manage applydomain "$@"
 }
 
+cmd_webhook() {
+  need_root
+  # ثبت یا حذف وبهوک بر اساس همان چیزی که در پنل انتخاب شده است
+  manage telegramwebhook "${1:-auto}"
+  # سرویس ربات باید ری‌استارت شود: در حالت وبهوک باید Polling را رها کند
+  # و در حالت Polling باید دوباره شروع کند.
+  systemctl restart "$BOT_SERVICE" "$WEB_SERVICE"
+  green "سرویس‌ها ری‌استارت شدند."
+}
+
+cmd_reports() {
+  need_root
+  check_install
+  # هر ساعت اجرا می‌شود و خود دستور تصمیم می‌گیرد که آیا ساعتِ تنظیم‌شده
+  # در پنل رسیده است یا نه. با این کار تغییر ساعت در پنل نیازی به
+  # دست زدن دوباره به cron ندارد.
+  local cron_file="/etc/cron.d/vpnshop-report"
+  cat > "$cron_file" <<EOF
+# گزارش فروش ربات VPN - ساخته‌شده توسط: vpnshop reports
+0 * * * * root cd $APP_DIR && VPNSHOP_RUNTIME_DIR=$RUNTIME_DIR PYTHONIOENCODING=utf-8 $PY manage.py sendreport --period auto >/dev/null 2>&1
+EOF
+  chmod 644 "$cron_file"
+  green "ارسال خودکار گزارش در cron ثبت شد: $cron_file"
+  yellow "برای اینکه واقعا ارسال شود، در پنل «ارسال گزارش فروش به مدیر» را روشن کنید."
+}
+
+cmd_report_now() {
+  manage sendreport --period "${1:-daily}" --force
+}
+
 cmd_backup() {
   manage backup "$@"
 }
@@ -177,6 +207,10 @@ vpnshop - مدیریت ربات فروش VPN
   vpnshop oxapay            تست کلید درگاه OxaPay و نمایش پاسخ واقعی درگاه
   vpnshop domain            اعمال دامنه و گواهی SSL ثبت‌شده در پنل روی Nginx
   vpnshop domain --print    فقط نمایش تنظیمات Nginx، بدون تغییر
+  vpnshop webhook           اعمال حالت Webhook/Polling تلگرام طبق تنظیم پنل
+  vpnshop webhook status    نمایش وضعیت فعلی وبهوک در تلگرام
+  vpnshop reports           ثبت ارسال خودکار گزارش فروش در cron
+  vpnshop report [daily|monthly]   ارسال فوری گزارش برای مدیر
   vpnshop backup            ساخت فایل پشتیبان از داده‌ها و فایل‌ها
   vpnshop restore <file>    بازگردانی از فایل پشتیبان و ری‌استارت سرویس‌ها
 EOF
@@ -198,6 +232,9 @@ main() {
     adduser) cmd_adduser "$@" ;;
     oxapay) cmd_oxapay "$@" ;;
     domain) cmd_domain "$@" ;;
+    webhook) cmd_webhook "$@" ;;
+    reports) cmd_reports "$@" ;;
+    report) cmd_report_now "$@" ;;
     backup) cmd_backup "$@" ;;
     restore) cmd_restore "$@" ;;
     help|-h|--help) cmd_help ;;
