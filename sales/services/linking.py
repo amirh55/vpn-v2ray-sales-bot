@@ -12,6 +12,7 @@ from datetime import datetime, timezone as dt_timezone
 from django.utils import timezone
 
 from sales.models import LinkedService, TelegramUser, XUIPanel
+from sales.services import jalali
 from sales.services.configlink import ConfigLinkError, extract_client_id, extract_label
 from sales.services.formatting import fa_digits
 from sales.services.xui import XUIClient, XUIError
@@ -40,11 +41,11 @@ def _expiry_text(expiry_ms: int) -> str:
         # Negative values are 3x-ui's "start on first use" duration, in ms.
         return fa_digits(int(abs(expiry_ms) / 86_400_000)) + ' روز پس از اولین اتصال'
     moment = datetime.fromtimestamp(expiry_ms / 1000, tz=dt_timezone.utc)
-    local = timezone.localtime(moment)
+    stamp = jalali.format_date(timezone.localtime(moment))
     remaining = moment - timezone.now()
     if remaining.total_seconds() <= 0:
-        return f'منقضی شده ({fa_digits(local.strftime("%Y-%m-%d"))})'
-    return f'{fa_digits(local.strftime("%Y-%m-%d"))} ({fa_digits(remaining.days)} روز باقی‌مانده)'
+        return f'منقضی شده ({stamp})'
+    return f'{stamp} ({fa_digits(remaining.days)} روز باقی‌مانده)'
 
 
 def usage_text(info: dict, title: str) -> str:

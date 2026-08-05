@@ -30,6 +30,7 @@ from sales.models import (
     TelegramUser,
     WalletTransaction,
 )
+from sales.services import jalali, messaging
 from sales.services.cardpay import create_request as create_card_request
 from sales.services.delivery import deliver_order
 from sales.services.discounts import DiscountError, resolve, validate as validate_discount
@@ -386,7 +387,7 @@ def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
     rows = []
     text = '📦 سرویس‌های شما:\n\n'
     for o in orders:
-        exp = fa_digits(timezone.localtime(o.expires_at).strftime('%Y-%m-%d')) if o.expires_at else 'بدون تاریخ'
+        exp = jalali.format_date(o.expires_at) if o.expires_at else 'بدون تاریخ'
         text += f'#{fa_digits(o.pk)} - {o.service.name} / {o.plan.name} / انقضا: {exp}\n'
         rows.append([(f'ارسال مجدد لینک #{o.pk}', f'resend:{o.pk}')])
 
@@ -632,33 +633,22 @@ def notify_auto_approved_cards(bot: TeleBot):
 
 
 def process_queued_broadcasts(bot: TeleBot):
+    """Drain anything left in the queue.
+
+    The panel sends a message the moment it is saved, so this is a safety net
+    rather than the main path: it covers a message queued from the list view,
+    and one whose web-side send died halfway. The sending itself is shared with
+    the panel so the customer gets the same message either way.
+    """
     while True:
         try:
             for bc in Broadcast.objects.filter(status=Broadcast.Status.QUEUED).order_by('created_at')[:5]:
-                # Same reason as above: move the row out of the queue before
-                # sending, so a second worker picking it up finds nothing.
-                claimed = Broadcast.objects.filter(
-                    pk=bc.pk, status=Broadcast.Status.QUEUED
-                ).update(status=Broadcast.Status.SENDING)
-                if not claimed:
-                    continue
-                sent = failed = 0
-                if bc.target_chat_id.strip():
-                    targets = [bc.target_chat_id.strip()]
-                else:
-                    targets = list(TelegramUser.objects.filter(is_blocked=False).values_list('chat_id', flat=True))
-                for chat_id in targets:
-                    try:
-                        bot.send_message(chat_id, bc.text, disable_web_page_preview=True)
-                        sent += 1
-                        time.sleep(0.05)
-                    except Exception as exc:  # noqa: BLE001
-                        failed += 1
-                        bc.last_error = str(exc)
-                bc.sent_count = sent
-                bc.failed_count = failed
-                bc.status = Broadcast.Status.SENT if failed == 0 else Broadcast.Status.FAILED
-                bc.save(update_fields=['sent_count', 'failed_count', 'status', 'last_error', 'updated_at'])
+                try:
+                    messaging.send(bc)
+                except messaging.MessagingError:
+                    # Claimed by the web process, or nobody to send to. Either
+                    # way the row already records why.
+                    pass
         except Exception:
             pass
         time.sleep(15)
@@ -763,7 +753,8 @@ def register_handlers(bot: TeleBot) -> None:
                 f'🔖 Username: @{user.username or "-"}\n'
                 f'🆔 Chat ID: <code>{user.chat_id}</code>\n\n'
                 f'💬 {text}\n\n'
-                'برای پاسخ، از پنل بخش «ارسال پیام گروهی/تکی» با همین Chat ID استفاده کنید.'
+                'برای پاسخ، در پنل به «پیام‌های پشتیبانی» بروید، همین پیام را باز کنید، '
+                'پاسخ را بنویسید و ذخیره بزنید.'
             )
             notify_operator(bot, admin_text, photo_file_id=message.photo[-1].file_id if message.photo else None)
             reset_user_state(user)
@@ -1124,7 +1115,11 @@ def register_handlers(bot: TeleBot) -> None:
                 return
             try:
                 renewed = renew_order_from_wallet(order, plan)
-                bot.send_message(call.message.chat.id, f'✅ سرویس شما تمدید شد. تاریخ انقضای جدید: {fa_digits(timezone.localtime(renewed.expires_at).strftime("%Y-%m-%d %H:%M"))}', reply_markup=main_reply_keyboard())
+                bot.send_message(
+                    call.message.chat.id,
+                    f'✅ سرویس شما تمدید شد. تاریخ انقضای جدید: {jalali.format_datetime(renewed.expires_at)}',
+                    reply_markup=main_reply_keyboard(),
+                )
             except Exception as exc:  # noqa: BLE001
                 bot.send_message(call.message.chat.id, f'خطا در تمدید خودکار. لطفاً با پشتیبانی ارتباط بگیرید.\n{exc}', reply_markup=main_reply_keyboard())
             return

@@ -510,6 +510,13 @@ class SupportMessage(TimeStampedModel):
     message_text = models.TextField('متن پیام', blank=True)
     telegram_message_id = models.BigIntegerField('Message ID', null=True, blank=True)
     is_answered = models.BooleanField('پاسخ داده شد', default=False)
+    reply_text = models.TextField(
+        'پاسخ شما به کاربر',
+        blank=True,
+        help_text='بنویسید و ذخیره کنید. پاسخ همان لحظه در تلگرام برای کاربر فرستاده می‌شود.',
+    )
+    answered_at = models.DateTimeField('زمان ارسال پاسخ', null=True, blank=True)
+    reply_error = models.CharField('نتیجه ارسال پاسخ', max_length=300, blank=True)
     admin_note = models.TextField('یادداشت مدیر', blank=True)
 
     class Meta:
@@ -678,13 +685,21 @@ class Broadcast(TimeStampedModel):
         SENT = 'sent', 'ارسال شده'
         FAILED = 'failed', 'ناموفق'
 
-    title = models.CharField('عنوان داخلی', max_length=150)
-    text = models.TextField('متن پیام')
-    target_chat_id = models.CharField('چت آیدی خاص؛ خالی یعنی همه کاربران', max_length=64, blank=True)
+    # Kept only so the list has something readable to show; the operator never
+    # has to invent one, it is taken from the message itself.
+    title = models.CharField('نام این پیام در فهرست', max_length=150, blank=True)
+    text = models.TextField('متن پیام', help_text='می‌توانید از تگ‌های <b> و <code> و لینک استفاده کنید.')
+    target_chat_id = models.CharField(
+        'گیرنده',
+        max_length=64,
+        blank=True,
+        help_text='خالی بگذارید تا برای همه کاربران ربات ارسال شود. برای ارسال به یک نفر، Chat ID او را بنویسید.',
+    )
     status = models.CharField('وضعیت', max_length=20, choices=Status.choices, default=Status.DRAFT)
     sent_count = models.PositiveIntegerField('تعداد ارسال موفق', default=0)
     failed_count = models.PositiveIntegerField('تعداد ناموفق', default=0)
     last_error = models.TextField('آخرین خطا', blank=True)
+    sent_at = models.DateTimeField('زمان ارسال', null=True, blank=True)
 
     class Meta:
         verbose_name = 'ارسال پیام گروهی/تکی'
@@ -692,4 +707,16 @@ class Broadcast(TimeStampedModel):
         ordering = ['-created_at']
 
     def __str__(self) -> str:
-        return self.title
+        return self.title or self.text[:40]
+
+    def save(self, *args, **kwargs):
+        if not self.title:
+            self.title = ' '.join((self.text or '').split())[:60] or 'بدون متن'
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'title' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['title']
+        super().save(*args, **kwargs)
+
+    @property
+    def is_single_target(self) -> bool:
+        return bool((self.target_chat_id or '').strip())

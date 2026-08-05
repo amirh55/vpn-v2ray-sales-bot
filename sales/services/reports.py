@@ -23,6 +23,7 @@ from sales.models import (
     Payment,
     TelegramUser,
 )
+from sales.services import jalali
 
 # Orders in these states represent money actually taken.
 EARNED_STATES = [Order.Status.PAID, Order.Status.PROVISIONED]
@@ -47,6 +48,22 @@ class Report:
     daily: list[dict] = field(default_factory=list)
 
     @property
+    def start_local(self) -> datetime:
+        return timezone.localtime(self.start)
+
+    @property
+    def end_local(self) -> datetime:
+        """The last moment inside the range, so a label never reads as the next day."""
+        return timezone.localtime(self.end) - timedelta(seconds=1)
+
+    @property
+    def range_title(self) -> str:
+        """The period spelled out in Shamsi, for a heading."""
+        start_text = jalali.format_long(self.start_local)
+        end_text = jalali.format_long(self.end_local)
+        return start_text if start_text == end_text else f'{start_text} تا {end_text}'
+
+    @property
     def average_order_toman(self) -> int:
         return int(self.revenue_toman / self.order_count) if self.order_count else 0
 
@@ -63,9 +80,15 @@ def day_bounds(day: date) -> tuple[datetime, datetime]:
 
 
 def month_bounds(day: date) -> tuple[datetime, datetime]:
-    first = day.replace(day=1)
-    next_first = (first + timedelta(days=32)).replace(day=1)
-    return day_bounds(first)[0], day_bounds(next_first)[0]
+    """The Jalali month this date falls in.
+
+    Shamsi months, not Gregorian ones: an Iranian shop's "this month" is Mordad,
+    and a Gregorian month boundary would cut the figures in the middle of it.
+    """
+    return (
+        day_bounds(jalali.month_first_day(day))[0],
+        day_bounds(jalali.next_month_first_day(day))[0],
+    )
 
 
 def named_range(name: str) -> tuple[datetime, datetime, str]:
@@ -73,22 +96,23 @@ def named_range(name: str) -> tuple[datetime, datetime, str]:
     today = timezone.localdate()
     if name == 'today':
         start, end = day_bounds(today)
-        return start, end, 'امروز'
+        return start, end, f'امروز، {jalali.format_long(today)}'
     if name == 'yesterday':
-        start, end = day_bounds(today - timedelta(days=1))
-        return start, end, 'دیروز'
+        yesterday = today - timedelta(days=1)
+        start, end = day_bounds(yesterday)
+        return start, end, f'دیروز، {jalali.format_long(yesterday)}'
     if name == 'week':
         start = day_bounds(today - timedelta(days=6))[0]
         return start, day_bounds(today)[1], '۷ روز گذشته'
     if name == 'last_month':
-        last_day_prev = today.replace(day=1) - timedelta(days=1)
-        start, end = month_bounds(last_day_prev)
-        return start, end, 'ماه گذشته'
+        previous = jalali.previous_month_day(today)
+        start, end = month_bounds(previous)
+        return start, end, jalali.month_title(previous)
     if name == 'year':
         start = day_bounds(today - timedelta(days=364))[0]
         return start, day_bounds(today)[1], '۱۲ ماه گذشته'
     start, end = month_bounds(today)
-    return start, end, 'این ماه'
+    return start, end, jalali.month_title(today)
 
 
 def build(start: datetime, end: datetime, label: str = '') -> Report:
@@ -212,8 +236,10 @@ def to_csv(report: Report) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerow(['گزارش فروش', report.label])
-    writer.writerow(['از', timezone.localtime(report.start).strftime('%Y-%m-%d %H:%M')])
-    writer.writerow(['تا', timezone.localtime(report.end).strftime('%Y-%m-%d %H:%M')])
+    # Latin digits in the file: a spreadsheet cannot sort or filter Persian ones.
+    writer.writerow(['از', jalali.format_date(report.start_local, latin_digits=True)])
+    writer.writerow(['تا', jalali.format_date(report.end_local, latin_digits=True)])
+    writer.writerow(['بازه میلادی', f'{report.start_local:%Y-%m-%d} تا {report.end_local:%Y-%m-%d}'])
     writer.writerow([])
 
     writer.writerow(['شاخص', 'مقدار'])
@@ -240,9 +266,14 @@ def to_csv(report: Report) -> bytes:
 
     if report.daily:
         writer.writerow([])
-        writer.writerow(['تاریخ', 'تعداد سفارش', 'درآمد'])
+        writer.writerow(['تاریخ شمسی', 'تاریخ میلادی', 'تعداد سفارش', 'درآمد'])
         for row in report.daily:
-            writer.writerow([row['date'].strftime('%Y-%m-%d'), row['count'], row['revenue']])
+            writer.writerow([
+                jalali.format_date(row['date'], latin_digits=True),
+                row['date'].strftime('%Y-%m-%d'),
+                row['count'],
+                row['revenue'],
+            ])
 
     return '﻿'.encode('utf-8') + buffer.getvalue().encode('utf-8')
 
@@ -253,8 +284,7 @@ def telegram_summary(report: Report) -> str:
 
     lines = [
         f'📊 <b>گزارش فروش — {report.label}</b>',
-        f'{fa_digits(timezone.localtime(report.start).strftime("%Y-%m-%d"))}'
-        f' تا {fa_digits(timezone.localtime(report.end - timedelta(seconds=1)).strftime("%Y-%m-%d"))}',
+        report.range_title,
         '',
         f'💰 درآمد: <b>{toman(report.revenue_toman)}</b>',
         f'🛒 سفارش: {fa_digits(report.order_count)}',

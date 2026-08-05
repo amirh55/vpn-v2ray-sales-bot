@@ -1,5 +1,5 @@
 import types
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from django import forms
 from django.contrib import admin, messages
@@ -16,9 +16,10 @@ from unfold.admin import ModelAdmin, TabularInline
 from .services.backup import RestoreError, backup_filename, create_backup, restore_backup
 from .services.cardpay import approve_request
 from .services.delivery import send_order
+from .services.messaging import MessagingError, reply_to_support as send_support_reply, send as send_broadcast
 from .services.payments import settle_payment
 from .services.provisioning import provision_order
-from .services import reports
+from .services import jalali, reports
 from .services.site_urls import (
     admin_url,
     certificate_status,
@@ -66,6 +67,25 @@ class DomainForm(forms.ModelForm):
         if ' ' in value:
             raise forms.ValidationError('دامنه نباید فاصله داشته باشد.')
         return value
+
+
+def jalali_column(field_name: str, description: str, *, with_time: bool = False):
+    """A list column showing a stored datetime as a Shamsi date.
+
+    Django renders DateTimeFields with its own Gregorian formatting and there is
+    no hook to change only some of them, so the columns operators actually read
+    are replaced with one of these. Sorting still uses the real field, so the
+    order is unaffected.
+    """
+    def column(self, obj):
+        value = getattr(obj, field_name, None)
+        if value is None:
+            return '-'
+        return jalali.format_datetime(value) if with_time else jalali.format_date(value)
+
+    column.short_description = description
+    column.admin_order_field = field_name
+    return column
 
 
 admin.site.site_header = 'پنل مدیریت فروش کانفیگ VPN'
@@ -293,7 +313,8 @@ class SiteSettingAdmin(ModelAdmin):
         max_daily = max((row['revenue'] for row in report.daily), default=0)
         daily_rows = [
             {
-                'date': row['date'].strftime('%Y-%m-%d'),
+                'date': jalali.format_date(row['date']),
+                'gregorian': row['date'].strftime('%Y-%m-%d'),
                 'count': f'{row["count"]:,}',
                 'revenue': f'{row["revenue"]:,}',
                 'percent': int(row['revenue'] * 100 / max_daily) if max_daily else 0,
@@ -306,17 +327,21 @@ class SiteSettingAdmin(ModelAdmin):
             'title': 'گزارش فروش',
             'report': report,
             'active_range': range_key,
-            'from_value': timezone.localtime(report.start).strftime('%Y-%m-%d'),
-            'to_value': (timezone.localtime(report.end) - timedelta(seconds=1)).strftime('%Y-%m-%d'),
-            'start_display': timezone.localtime(report.start).strftime('%Y-%m-%d'),
-            'end_display': (timezone.localtime(report.end) - timedelta(seconds=1)).strftime('%Y-%m-%d'),
+            # The pickers stay on the browser's native Gregorian control, which
+            # needs no JavaScript and cannot be typed wrong; the Shamsi equivalent
+            # of whatever is picked is shown next to them.
+            'from_value': report.start_local.strftime('%Y-%m-%d'),
+            'to_value': report.end_local.strftime('%Y-%m-%d'),
+            'from_jalali': jalali.format_date(report.start_local),
+            'to_jalali': jalali.format_date(report.end_local),
+            'range_title': report.range_title,
             'csv_url': f'{reverse("admin:sales_report_csv")}?{request.GET.urlencode()}',
             'quick_ranges': [
                 {'key': 'today', 'title': 'امروز'},
                 {'key': 'yesterday', 'title': 'دیروز'},
                 {'key': 'week', 'title': '۷ روز'},
-                {'key': 'month', 'title': 'این ماه'},
-                {'key': 'last_month', 'title': 'ماه گذشته'},
+                {'key': 'month', 'title': jalali.month_title(timezone.localdate())},
+                {'key': 'last_month', 'title': jalali.month_title(jalali.previous_month_day(timezone.localdate()))},
                 {'key': 'year', 'title': '۱۲ ماه'},
             ],
             'cards': [
@@ -570,8 +595,9 @@ class DiscountRedemptionInline(TabularInline):
     model = DiscountRedemption
     extra = 0
     can_delete = False
-    fields = ('user', 'order', 'amount_toman', 'created_at')
-    readonly_fields = ('user', 'order', 'amount_toman', 'created_at')
+    fields = ('user', 'order', 'amount_toman', 'created_jalali')
+    readonly_fields = ('user', 'order', 'amount_toman', 'created_jalali')
+    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
 
     def has_add_permission(self, request, obj=None):
         return False
@@ -622,16 +648,17 @@ class DiscountCodeAdmin(ModelAdmin):
         if obj.valid_until and obj.valid_until < now:
             return 'منقضی شده'
         if obj.valid_from and obj.valid_from > now:
-            return f'از {timezone.localtime(obj.valid_from):%Y-%m-%d}'
+            return f'از {jalali.format_date(obj.valid_from)}'
         if obj.valid_until:
-            return f'تا {timezone.localtime(obj.valid_until):%Y-%m-%d}'
+            return f'تا {jalali.format_date(obj.valid_until)}'
         return 'بدون محدودیت زمانی'
 
 
 @admin.register(DiscountRedemption)
 class DiscountRedemptionAdmin(ModelAdmin):
-    list_display = ('code', 'user', 'order', 'amount_toman', 'created_at')
+    list_display = ('code', 'user', 'order', 'amount_toman', 'created_jalali')
     list_filter = ('code',)
+    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('code__code', 'user__chat_id', 'user__username')
     readonly_fields = ('code', 'user', 'order', 'amount_toman', 'amount_usd', 'created_at', 'updated_at')
 
@@ -641,10 +668,11 @@ class DiscountRedemptionAdmin(ModelAdmin):
 
 @admin.register(TelegramUser)
 class TelegramUserAdmin(ModelAdmin):
-    list_display = ('chat_id', 'username', 'full_name', 'wallet_balance_toman', 'is_blocked', 'created_at')
+    list_display = ('chat_id', 'username', 'full_name', 'wallet_balance_toman', 'is_blocked', 'created_jalali')
     list_filter = ('is_blocked',)
     search_fields = ('chat_id', 'username', 'first_name', 'last_name')
     readonly_fields = ('created_at', 'updated_at')
+    created_jalali = jalali_column('created_at', 'تاریخ عضویت')
 
     @admin.display(description='نام')
     def full_name(self, obj):
@@ -687,8 +715,10 @@ def provision_and_send(modeladmin, request, queryset):
 
 @admin.register(Order)
 class OrderAdmin(ModelAdmin):
-    list_display = ('id', 'user', 'service', 'plan', 'status', 'source', 'amount_toman', 'discount_code', 'expires_at', 'created_at')
+    list_display = ('id', 'user', 'service', 'plan', 'status', 'source', 'amount_toman', 'discount_code', 'expires_jalali', 'created_jalali')
     list_filter = ('status', 'source', 'service', 'plan', 'discount_code')
+    expires_jalali = jalali_column('expires_at', 'تاریخ انقضا', with_time=True)
+    created_jalali = jalali_column('created_at', 'تاریخ ثبت')
     search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid')
     actions = [resend_order_config, provision_and_send]
     readonly_fields = ('config_link_click', 'subscription_link_click', 'qr_preview', 'created_at', 'updated_at')
@@ -720,10 +750,11 @@ class OrderAdmin(ModelAdmin):
 
 @admin.register(WalletTransaction)
 class WalletTransactionAdmin(ModelAdmin):
-    list_display = ('user', 'kind', 'amount_toman', 'balance_after_toman', 'order', 'created_at')
+    list_display = ('user', 'kind', 'amount_toman', 'balance_after_toman', 'order', 'created_jalali')
     list_filter = ('kind',)
     search_fields = ('user__chat_id', 'description')
     readonly_fields = ('created_at', 'updated_at')
+    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
 
 
 @admin.action(description='تایید دستی پرداخت، شارژ کیف پول و تحویل سرویس')
@@ -751,8 +782,9 @@ def approve_payments_manually(modeladmin, request, queryset):
 
 @admin.register(Payment)
 class PaymentAdmin(ModelAdmin):
-    list_display = ('order_id', 'user', 'provider', 'purpose', 'status', 'amount_toman', 'amount_usd', 'track_id', 'created_at')
+    list_display = ('order_id', 'user', 'provider', 'purpose', 'status', 'amount_toman', 'amount_usd', 'track_id', 'created_jalali')
     list_filter = ('provider', 'purpose', 'status')
+    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('order_id', 'track_id', 'user__chat_id', 'user__username')
     readonly_fields = ('raw_payload', 'created_at', 'updated_at')
     actions = [approve_payments_manually]
@@ -760,13 +792,56 @@ class PaymentAdmin(ModelAdmin):
 
 @admin.register(SupportMessage)
 class SupportMessageAdmin(ModelAdmin):
-    list_display = ('user', 'short_text', 'is_answered', 'created_at')
+    """Read a customer's message and answer it without leaving the panel."""
+
+    list_display = ('user', 'short_text', 'answered_state', 'created_jalali')
     list_filter = ('is_answered',)
     search_fields = ('user__chat_id', 'user__username', 'message_text')
+    readonly_fields = (
+        'user', 'message_text', 'telegram_message_id', 'is_answered',
+        'answered_at_jalali', 'reply_error', 'created_jalali',
+    )
+    fieldsets = (
+        ('پیام کاربر', {'fields': ('user', 'message_text', 'created_jalali')}),
+        ('پاسخ شما', {
+            'fields': ('reply_text',),
+            'description': 'پاسخ را بنویسید و «ذخیره» را بزنید. پیام همان لحظه در تلگرام برای کاربر ارسال می‌شود.',
+        }),
+        ('وضعیت', {'fields': ('is_answered', 'answered_at_jalali', 'reply_error', 'admin_note')}),
+    )
+    created_jalali = jalali_column('created_at', 'تاریخ پیام', with_time=True)
+    answered_at_jalali = jalali_column('answered_at', 'زمان ارسال پاسخ', with_time=True)
+
+    def has_add_permission(self, request):
+        # These arrive from the bot; writing one here would have no customer.
+        return False
 
     @admin.display(description='متن')
     def short_text(self, obj):
         return obj.message_text[:80]
+
+    @admin.display(description='پاسخ', boolean=True)
+    def answered_state(self, obj):
+        return obj.is_answered
+
+    def save_model(self, request, obj, form, change):
+        """Saving a reply is what sends it.
+
+        The operator expects the button in front of them to do the thing; a
+        separate action they have to find is how replies went unanswered.
+        """
+        reply = (form.cleaned_data.get('reply_text') or '').strip()
+        already_sent = 'reply_text' not in form.changed_data and obj.is_answered
+        super().save_model(request, obj, form, change)
+
+        if not reply or already_sent:
+            return
+        try:
+            send_support_reply(obj, reply)
+        except MessagingError as exc:
+            messages.error(request, str(exc))
+            return
+        messages.success(request, f'پاسخ شما برای کاربر {obj.user.chat_id} در تلگرام ارسال شد.')
 
 
 @admin.action(description='تایید و شارژ کیف پول')
@@ -789,9 +864,10 @@ def approve_card_requests(modeladmin, request, queryset):
 class CardPaymentRequestAdmin(ModelAdmin):
     list_display = (
         'id', 'user', 'amount_toman', 'status', 'auto_approved',
-        'expiry_state', 'has_receipt', 'created_at',
+        'expiry_state', 'has_receipt', 'created_jalali',
     )
     list_filter = ('status', 'auto_approved')
+    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('user__chat_id', 'user__username', 'receipt_text', 'amount_toman')
     readonly_fields = ('base_amount_toman', 'expires_at', 'auto_approved', 'notified_at', 'created_at', 'updated_at')
     actions = [approve_card_requests]
@@ -811,8 +887,9 @@ class CardPaymentRequestAdmin(ModelAdmin):
 
 @admin.register(BankSms)
 class BankSmsAdmin(ModelAdmin):
-    list_display = ('created_at', 'sender', 'parsed_amount_toman', 'matched_request', 'note')
+    list_display = ('created_jalali', 'sender', 'parsed_amount_toman', 'matched_request', 'note')
     list_filter = ('note',)
+    created_jalali = jalali_column('created_at', 'تاریخ', with_time=True)
     search_fields = ('sender', 'raw_text', 'note')
     readonly_fields = ('sender', 'raw_text', 'parsed_amount_toman', 'matched_request', 'note', 'created_at', 'updated_at')
 
@@ -836,15 +913,100 @@ class LinkedServiceAdmin(ModelAdmin):
     readonly_fields = ('created_at', 'updated_at')
 
 
-@admin.action(description='قرار دادن در صف ارسال')
-def queue_broadcasts(modeladmin, request, queryset):
-    updated = queryset.update(status=Broadcast.Status.QUEUED)
-    messages.success(request, f'{updated} پیام در صف ارسال قرار گرفت. تا وقتی دستور bot در حال اجرا باشد ارسال می‌شود.')
+@admin.action(description='📨 ارسال دوباره این پیام‌ها')
+def resend_broadcasts(modeladmin, request, queryset):
+    """Retry from the list, for a message whose first attempt failed."""
+    for broadcast in queryset:
+        try:
+            result = send_broadcast(broadcast)
+        except MessagingError as exc:
+            messages.error(request, f'«{broadcast}»: {exc}')
+            continue
+        if result['inline']:
+            messages.success(request, f'«{broadcast}»: {result["sent"]} پیام ارسال شد، {result["failed"]} ناموفق.')
+        else:
+            messages.info(request, f'«{broadcast}»: ارسال به {result["total"]} کاربر شروع شد.')
 
 
 @admin.register(Broadcast)
 class BroadcastAdmin(ModelAdmin):
-    list_display = ('title', 'target_chat_id', 'status', 'sent_count', 'failed_count', 'updated_at')
+    """Write a message, save it, and it goes out.
+
+    The counters and the status are a log of what happened, not settings: the
+    operator decides only who receives the message and what it says.
+    """
+
+    list_display = ('title', 'recipient', 'status', 'sent_count', 'failed_count', 'sent_jalali')
     list_filter = ('status',)
     search_fields = ('title', 'text', 'target_chat_id')
-    actions = [queue_broadcasts]
+    actions = [resend_broadcasts]
+    readonly_fields = (
+        'status', 'sent_count', 'failed_count', 'last_error', 'sent_jalali', 'created_jalali', 'delivery_log',
+    )
+    fieldsets = (
+        ('پیام', {
+            'fields': ('target_chat_id', 'text'),
+            'description': (
+                'متن را بنویسید و «ذخیره» را بزنید — پیام همان لحظه ارسال می‌شود. '
+                'برای ارسال به یک نفر، Chat ID او را در «گیرنده» بنویسید؛ '
+                'خالی گذاشتن یعنی ارسال به همه کاربران ربات.'
+            ),
+        }),
+        ('نتیجه ارسال', {'fields': ('delivery_log',)}),
+    )
+    sent_jalali = jalali_column('sent_at', 'زمان ارسال', with_time=True)
+    created_jalali = jalali_column('created_at', 'تاریخ ساخت', with_time=True)
+
+    @admin.display(description='گیرنده')
+    def recipient(self, obj):
+        return obj.target_chat_id.strip() if obj.is_single_target else 'همه کاربران'
+
+    @admin.display(description='نتیجه ارسال')
+    def delivery_log(self, obj):
+        if not obj or not obj.pk:
+            return 'بعد از ذخیره، نتیجه ارسال اینجا نوشته می‌شود.'
+        rows = [f'<b>وضعیت:</b> {escape(obj.get_status_display())}']
+        if obj.sent_at:
+            rows.append(f'<b>زمان ارسال:</b> {escape(jalali.format_datetime(obj.sent_at))}')
+        rows.append(f'<b>ارسال موفق:</b> {obj.sent_count} — <b>ناموفق:</b> {obj.failed_count}')
+        if obj.last_error:
+            rows.append(f'<b>آخرین خطا:</b> {escape(obj.last_error[:500])}')
+        if obj.status == Broadcast.Status.SENDING:
+            rows.append('ارسال در حال انجام است. چند لحظه بعد صفحه را تازه کنید.')
+        elif obj.status == Broadcast.Status.FAILED:
+            rows.append('برای تلاش دوباره، از فهرست پیام‌ها اکشن «ارسال دوباره این پیام‌ها» را بزنید.')
+        return mark_safe('<br>'.join(rows))  # noqa: S308 - escaped above
+
+    def get_readonly_fields(self, request, obj=None):
+        # Once a message has gone out, its text is history; editing it would
+        # make the log describe something the customer never received.
+        fields = list(super().get_readonly_fields(request, obj))
+        if obj and obj.status in (Broadcast.Status.SENT, Broadcast.Status.SENDING):
+            fields += ['text', 'target_chat_id']
+        return fields
+
+    def save_model(self, request, obj, form, change):
+        was_unsent = obj.status in (Broadcast.Status.DRAFT, Broadcast.Status.QUEUED) or not obj.pk
+        super().save_model(request, obj, form, change)
+        if not was_unsent:
+            return
+        try:
+            result = send_broadcast(obj)
+        except MessagingError as exc:
+            messages.error(request, str(exc))
+            return
+        if result['inline']:
+            if result['failed']:
+                messages.warning(
+                    request,
+                    f'{result["sent"]} پیام ارسال شد و {result["failed"]} مورد ناموفق بود. '
+                    'جزئیات را در بخش «نتیجه ارسال» ببینید.',
+                )
+            else:
+                messages.success(request, f'پیام برای {result["sent"]} کاربر ارسال شد.')
+        else:
+            messages.info(
+                request,
+                f'ارسال به {result["total"]} کاربر شروع شد و در پس‌زمینه ادامه دارد. '
+                'برای دیدن نتیجه، کمی بعد همین صفحه را باز کنید.',
+            )

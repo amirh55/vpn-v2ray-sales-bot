@@ -7,11 +7,11 @@ message here means the customer sees the same thing either way.
 
 from __future__ import annotations
 
-from django.utils import timezone
 from telebot import TeleBot
 
 from sales.models import Order, SiteSetting
-from sales.services.formatting import days_text, fa_digits, traffic_text
+from sales.services import jalali
+from sales.services.formatting import days_text, traffic_text
 
 
 def order_delivery_text(order: Order) -> str:
@@ -24,8 +24,7 @@ def order_delivery_text(order: Order) -> str:
         f'حجم: {traffic_text(order.plan.traffic_gb)}',
     ]
     if order.expires_at:
-        stamp = timezone.localtime(order.expires_at).strftime('%Y-%m-%d %H:%M')
-        lines.append(f'تاریخ انقضا: {fa_digits(stamp)}')
+        lines.append(f'تاریخ انقضا: {jalali.format_datetime(order.expires_at)}')
     if order.config_link:
         lines += ['', '🔗 <b>لینک کانفیگ:</b>', f'<code>{order.config_link}</code>']
     if order.subscription_link:
