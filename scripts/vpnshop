@@ -172,6 +172,11 @@ EOF
   yellow "برای اینکه واقعا ارسال شود، در پنل «ارسال گزارش فروش به مدیر» را روشن کنید."
 }
 
+cmd_sweep() {
+  # بررسی مصرف همه اشتراک‌ها از روی پنل و علامت زدن آن‌هایی که حجمشان تمام شده
+  manage sweepservices
+}
+
 cmd_report_now() {
   manage sendreport --period "${1:-daily}" --force
 }
@@ -211,6 +216,7 @@ vpnshop - مدیریت ربات فروش VPN
   vpnshop webhook status    نمایش وضعیت فعلی وبهوک در تلگرام
   vpnshop reports           ثبت ارسال خودکار گزارش فروش در cron
   vpnshop report [daily|monthly]   ارسال فوری گزارش برای مدیر
+  vpnshop sweep             بررسی فوری حجم مصرف‌شده اشتراک‌ها از روی پنل
   vpnshop backup            ساخت فایل پشتیبان از داده‌ها و فایل‌ها
   vpnshop restore <file>    بازگردانی از فایل پشتیبان و ری‌استارت سرویس‌ها
 EOF
@@ -235,6 +241,7 @@ main() {
     webhook) cmd_webhook "$@" ;;
     reports) cmd_reports "$@" ;;
     report) cmd_report_now "$@" ;;
+    sweep) cmd_sweep "$@" ;;
     backup) cmd_backup "$@" ;;
     restore) cmd_restore "$@" ;;
     help|-h|--help) cmd_help ;;

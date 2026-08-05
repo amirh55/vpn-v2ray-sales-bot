@@ -30,7 +30,7 @@ from sales.models import (
     TelegramUser,
     WalletTransaction,
 )
-from sales.services import jalali, messaging
+from sales.services import jalali, lifecycle, messaging
 from sales.services.cardpay import create_request as create_card_request
 from sales.services.clientname import (
     PROMPT_TEXT as CLIENT_NAME_PROMPT,
@@ -427,7 +427,14 @@ def show_topup_methods(bot: TeleBot, chat_id: int, amount: int, call=None):
 
 
 def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
-    orders = Order.objects.filter(user=user, status=Order.Status.PROVISIONED).select_related('plan', 'service').order_by('-created_at')[:10]
+    # A finished subscription stays here for the grace period so it can be
+    # renewed from the same place, then drops out of the customer's list.
+    orders = (
+        Order.objects.filter(user=user)
+        .visible_to_customer()
+        .select_related('plan', 'service')
+        .order_by('-created_at')[:10]
+    )
     linked = LinkedService.objects.filter(user=user).select_related('panel').order_by('-created_at')[:10]
     if not orders and not linked:
         send_or_edit(
@@ -443,10 +450,24 @@ def show_my_services(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
 
     rows = []
     text = '📦 سرویس‌های شما:\n\n'
+    finished_any = False
     for o in orders:
         exp = jalali.format_date(o.expires_at) if o.expires_at else 'بدون تاریخ'
-        text += f'#{fa_digits(o.pk)} - {o.service.name} / {o.plan.name} / انقضا: {exp}\n'
-        rows.append([(f'ارسال مجدد لینک #{o.pk}', f'resend:{o.pk}')])
+        reason = o.ended_reason()
+        mark = f' — ⛔️ {reason}' if reason else ''
+        finished_any = finished_any or bool(reason)
+        text += f'#{fa_digits(o.pk)} - {o.service.name} / {o.plan.name} / انقضا: {exp}{mark}\n'
+        if reason:
+            rows.append([(f'🔁 تمدید #{o.pk}', f'reneword:{o.pk}')])
+        else:
+            rows.append([(f'ارسال مجدد لینک #{o.pk}', f'resend:{o.pk}')])
+
+    if finished_any:
+        grace = int(get_site().service_grace_days)
+        text += (
+            f'\n⛔️ سرویس‌هایی که تمام شده‌اند تا {fa_digits(grace)} روز اینجا می‌مانند '
+            'تا بتوانید تمدیدشان کنید، بعد از آن از این فهرست حذف می‌شوند.\n'
+        )
 
     if linked:
         text += '\n➕ سرویس‌های افزوده‌شده:\n'
@@ -558,11 +579,22 @@ def show_linked_usage(bot: TeleBot, user: TelegramUser, chat_id: int, linked_id:
 
 
 def show_renew(bot: TeleBot, user: TelegramUser, chat_id: int, call=None):
-    orders = Order.objects.filter(user=user, status=Order.Status.PROVISIONED).select_related('plan', 'service').order_by('-created_at')[:10]
+    # Finished subscriptions are offered here too, for as long as they are still
+    # in the customer's list: renewing one is exactly what the grace period is for.
+    orders = (
+        Order.objects.filter(user=user)
+        .visible_to_customer()
+        .select_related('plan', 'service')
+        .order_by('-created_at')[:10]
+    )
     if not orders:
         send_or_edit(bot, chat_id, 'برای تمدید، ابتدا باید یک سرویس فعال داشته باشید.', home_inline_keyboard(), call=call)
         return
-    rows = [[(f'{o.service.name} / {o.plan.name} #{o.pk}', f'reneword:{o.pk}')] for o in orders]
+    rows = [
+        [(f'{o.service.name} / {o.plan.name} #{o.pk}' + (f' ({o.ended_reason()})' if o.ended_reason() else ''),
+          f'reneword:{o.pk}')]
+        for o in orders
+    ]
     rows.append([('بازگشت', 'cancel')])
     send_or_edit(bot, chat_id, 'کدام سرویس را تمدید می‌کنید؟', inline(rows), call=call)
 
@@ -711,6 +743,21 @@ def process_queued_broadcasts(bot: TeleBot):
         time.sleep(15)
 
 
+def watch_finished_services():
+    """Keep the traffic flag on subscriptions up to date.
+
+    Runs on a slow timer: one request per panel per pass, and nothing a customer
+    is waiting on. The expiry side needs no sweep — a date in the past speaks
+    for itself — so this exists only for the quota.
+    """
+    while True:
+        try:
+            lifecycle.sweep_all()
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(600)
+
+
 def publish_commands(bot: TeleBot) -> None:
     """Fill Telegram's slash-command menu. Failure here is not fatal."""
     try:
@@ -738,6 +785,7 @@ def start_background_workers(bot: TeleBot) -> None:
     """
     threading.Thread(target=process_queued_broadcasts, args=(bot,), daemon=True).start()
     threading.Thread(target=notify_auto_approved_cards, args=(bot,), daemon=True).start()
+    threading.Thread(target=watch_finished_services, daemon=True).start()
 
 
 def build_bot(token: str, *, with_workers: bool = True, threaded: bool = True) -> TeleBot:

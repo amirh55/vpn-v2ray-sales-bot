@@ -221,10 +221,16 @@ def renew_order_from_wallet(order: Order, plan: Plan) -> Order:
             order=order,
             description=f'تمدید پلن {plan.name}',
         )
+        # Renewing a subscription that still has time left adds to it; renewing
+        # one that already ran out starts the new period from now, so the
+        # customer does not pay for days that already passed.
         base_expiry = order.expires_at if order.expires_at and order.expires_at > timezone.now() else timezone.now()
         new_expiry = base_expiry + timezone.timedelta(days=plan.duration_days)
         order.expires_at = new_expiry
         order.traffic_bytes = gb_to_bytes(plan.traffic_gb)
+        # The new period comes with its own quota, so whatever ended the old one
+        # no longer applies.
+        order.traffic_ended_at = None
         order.user_limit = plan.user_limit
         order.plan = plan
         order.amount_usd = plan.price_usd
@@ -233,6 +239,10 @@ def renew_order_from_wallet(order: Order, plan: Plan) -> Order:
         order.save()
 
     if order.xui_client_email and order.xui_client_uuid:
+        client = XUIClient(order.service.panel)
         payload = build_client_payload(order, order.xui_client_uuid, order.xui_client_email, order.expires_at)
-        XUIClient(order.service.panel).update_client(order.xui_client_email, payload)
+        client.update_client(order.xui_client_email, payload)
+        # Without this the panel keeps the old usage against the new quota, and
+        # a customer who just renewed a used-up plan stays disconnected.
+        client.reset_client_traffic(order.xui_client_email)
     return order

@@ -108,6 +108,16 @@ class SiteSetting(TimeStampedModel):
         help_text='عدد ۰ تا ۲۳ به وقت سرور. گزارش ماهانه هم در همین ساعتِ روز اول ماه فرستاده می‌شود.',
     )
 
+    service_grace_days = models.PositiveSmallIntegerField(
+        'روزهای نمایش سرویس بعد از اتمام',
+        default=30,
+        help_text=(
+            'بعد از تمام شدن زمان یا حجم یک اشتراک، این تعداد روز هنوز در «سرویس‌های من» '
+            'کاربر دیده می‌شود تا بتواند تمدیدش کند، بعد از آن از فهرست او حذف می‌شود. '
+            'سفارش در پنل و گزارش‌ها باقی می‌ماند. ۰ یعنی بلافاصله حذف شود.'
+        ),
+    )
+
     tutorial_text = models.TextField('متن آموزش اتصال', blank=True, default='آموزش اتصال را از این بخش تنظیم کنید.')
     contact_intro_text = models.TextField('متن بخش ارتباط با ما', blank=True, default='پیام خود را ارسال کنید. پشتیبانی پاسخ شما را بررسی می‌کند.')
     faq_intro_text = models.TextField(
@@ -376,6 +386,23 @@ class TelegramUser(TimeStampedModel):
         return f'{self.chat_id} @{self.username}'.strip()
 
 
+class OrderQuerySet(models.QuerySet):
+    def visible_to_customer(self, grace_days: int | None = None):
+        """Subscriptions still worth showing the customer who bought them.
+
+        A finished subscription stays in their list for a while so they can
+        renew it from there, then drops out. Both ways of finishing count: the
+        expiry date passing, and the traffic quota running out.
+        """
+        if grace_days is None:
+            grace_days = int(SiteSetting.get_solo().service_grace_days)
+        cutoff = timezone.now() - timezone.timedelta(days=grace_days)
+        return self.filter(status=Order.Status.PROVISIONED).filter(
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=cutoff),
+            models.Q(traffic_ended_at__isnull=True) | models.Q(traffic_ended_at__gt=cutoff),
+        )
+
+
 class Order(TimeStampedModel):
     class Status(models.TextChoices):
         PENDING = 'pending', 'در انتظار پرداخت/پردازش'
@@ -401,6 +428,10 @@ class Order(TimeStampedModel):
     xui_client_uuid = models.CharField('UUID کلاینت', max_length=80, blank=True)
     xui_client_email = models.CharField('Email/شناسه کلاینت در 3x-ui', max_length=150, blank=True)
     expires_at = models.DateTimeField('تاریخ انقضا', null=True, blank=True)
+    # Stamped by the sweep that reads usage from the panel. Traffic running out
+    # ends a subscription just as surely as the date passing, but only the panel
+    # knows it has happened.
+    traffic_ended_at = models.DateTimeField('زمان تمام شدن حجم', null=True, blank=True)
     traffic_bytes = models.BigIntegerField('حجم به بایت؛ ۰ یعنی نامحدود', default=0)
     user_limit = models.PositiveIntegerField('تعداد کاربر', default=1)
     config_link = models.TextField('لینک کانفیگ', blank=True)
@@ -419,6 +450,8 @@ class Order(TimeStampedModel):
     discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
     admin_note = models.TextField('یادداشت مدیر', blank=True)
 
+    objects = OrderQuerySet.as_manager()
+
     class Meta:
         verbose_name = 'سفارش/اشتراک'
         verbose_name_plural = 'سفارش‌ها/اشتراک‌ها'
@@ -429,7 +462,26 @@ class Order(TimeStampedModel):
 
     @property
     def is_active(self) -> bool:
-        return self.status == self.Status.PROVISIONED and (self.expires_at is None or self.expires_at > timezone.now())
+        if self.status != self.Status.PROVISIONED or self.traffic_ended_at is not None:
+            return False
+        return self.expires_at is None or self.expires_at > timezone.now()
+
+    @property
+    def ended_at(self):
+        """When this subscription stopped working, whichever came first."""
+        moments = [m for m in (self.expires_at, self.traffic_ended_at) if m is not None]
+        return min(moments) if moments else None
+
+    def ended_reason(self) -> str:
+        """Why it stopped, for telling the customer in one short phrase."""
+        now = timezone.now()
+        if self.traffic_ended_at and self.traffic_ended_at <= now:
+            if self.expires_at and self.expires_at <= self.traffic_ended_at:
+                return 'زمان تمام شده'
+            return 'حجم تمام شده'
+        if self.expires_at and self.expires_at <= now:
+            return 'زمان تمام شده'
+        return ''
 
 
 class WalletTransaction(TimeStampedModel):

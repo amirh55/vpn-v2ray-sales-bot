@@ -18,6 +18,7 @@ from .services.cardpay import approve_request
 from .services.delivery import send_order
 from .services.messaging import MessagingError, reply_to_support as send_support_reply, send as send_broadcast
 from .services.payments import settle_payment
+from .services.lifecycle import sweep_all as sweep_finished_services
 from .services.provisioning import provision_order
 from .services import reports
 from .services.site_urls import (
@@ -127,6 +128,14 @@ class SiteSettingAdmin(ModelAdmin):
             ),
         }),
         ('گزارش فروش', {'fields': ('daily_report_enabled', 'daily_report_hour', 'report_tools')}),
+        ('نمایش سرویس‌ها به کاربر', {
+            'fields': ('service_grace_days',),
+            'description': (
+                'وقتی زمان یا حجم یک اشتراک تمام شود، تا این تعداد روز هنوز در «سرویس‌های من» '
+                'کاربر دیده می‌شود تا بتواند تمدیدش کند. بعد از آن از فهرست او حذف می‌شود، '
+                'ولی سفارش در پنل و گزارش‌ها باقی می‌ماند.'
+            ),
+        }),
         ('کارت‌به‌کارت', {
             'fields': (
                 'card_to_card_enabled', 'card_number', 'card_holder_name', 'card_bank_name',
@@ -686,16 +695,43 @@ def provision_and_send(modeladmin, request, queryset):
         messages.success(request, f'{done} سرویس ساخته و برای کاربر ارسال شد.')
 
 
+@admin.action(description='🔄 بررسی حجم مصرف‌شده از روی پنل')
+def refresh_traffic_state(modeladmin, request, queryset):
+    """Read usage from every panel now, instead of waiting for the timer."""
+    result = sweep_finished_services()
+    messages.success(
+        request,
+        f'{result["checked"]} سرویس روی {result["panels"]} پنل بررسی شد. '
+        f'{result["ended"]} مورد حجمش تمام شده بود و {result["revived"]} مورد دوباره فعال شد.',
+    )
+    if result['failed']:
+        messages.warning(request, f'{result["failed"]} پنل در دسترس نبود و بررسی نشد.')
+
+
 @admin.register(Order)
 class OrderAdmin(ModelAdmin):
-    list_display = ('id', 'user', 'service', 'plan', 'status', 'source', 'amount_toman', 'discount_code', 'expires_at', 'created_at')
+    list_display = (
+        'id', 'user', 'service', 'plan', 'status', 'lifecycle_state',
+        'amount_toman', 'discount_code', 'expires_at', 'created_at',
+    )
     list_filter = ('status', 'source', 'service', 'plan', 'discount_code')
     search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid')
-    actions = [resend_order_config, provision_and_send]
+    actions = [resend_order_config, provision_and_send, refresh_traffic_state]
+
+    @admin.display(description='وضعیت اشتراک')
+    def lifecycle_state(self, obj):
+        if obj.status != Order.Status.PROVISIONED:
+            return '-'
+        reason = obj.ended_reason()
+        if not reason:
+            return '✅ فعال'
+        grace = int(SiteSetting.get_solo().service_grace_days)
+        gone = obj.ended_at + timezone.timedelta(days=grace) <= timezone.now() if obj.ended_at else False
+        return f'⛔️ {reason}' + (' (از فهرست کاربر حذف شده)' if gone else ' (هنوز در فهرست کاربر)')
     readonly_fields = ('config_link_click', 'subscription_link_click', 'qr_preview', 'created_at', 'updated_at')
     fieldsets = (
         ('سفارش', {'fields': ('user', 'service', 'plan', 'source', 'status', 'amount_usd', 'amount_toman', 'discount_code', 'discount_toman', 'admin_note')}),
-        ('تحویل 3x-ui', {'fields': ('xui_client_uuid', 'xui_client_email', 'expires_at', 'traffic_bytes', 'user_limit')}),
+        ('تحویل 3x-ui', {'fields': ('xui_client_uuid', 'xui_client_email', 'expires_at', 'traffic_ended_at', 'traffic_bytes', 'user_limit')}),
         ('لینک‌ها', {'fields': ('config_link', 'subscription_link', 'config_link_click', 'subscription_link_click', 'qr_image', 'qr_preview')}),
         ('زمان‌ها', {'fields': ('created_at', 'updated_at')}),
     )

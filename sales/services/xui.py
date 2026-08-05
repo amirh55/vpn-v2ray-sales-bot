@@ -745,6 +745,46 @@ class XUIClient:
             f'خطاها: ' + ' | '.join(errors[-6:])
         )
 
+    def reset_client_traffic(self, email: str) -> bool:
+        """Zero a client's used up/down counters.
+
+        Needed on renewal: replacing the quota alone leaves the old usage in
+        place, so a customer who renewed a used-up plan would still be over
+        their limit and stay disconnected.
+        """
+        for path in (f'/clients/resetTraffic/{email}', f'/client/resetTraffic/{email}'):
+            try:
+                if self._ok(self.request('POST', self._api_url(path))):
+                    return True
+            except XUIError:
+                continue
+        return False
+
+    def usage_by_email(self) -> dict[str, dict[str, int]]:
+        """Live traffic counters for every client on this panel, in one request.
+
+        One call covers the whole panel, which is what makes the sweep that
+        looks for finished subscriptions cheap enough to run on a timer.
+        """
+        stats: dict[str, dict[str, int]] = {}
+        for inbound in self._as_list(self.list_inbounds()):
+            rows = inbound.get('clientStats') or []
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                email = str(row.get('email') or '').strip()
+                if not email:
+                    continue
+                # A client on several inbounds has a row per inbound; its usage
+                # and quota are the totals across them.
+                bucket = stats.setdefault(email.lower(), {'up': 0, 'down': 0, 'total': 0})
+                bucket['up'] += int(row.get('up') or 0)
+                bucket['down'] += int(row.get('down') or 0)
+                bucket['total'] += int(row.get('total') or 0)
+        return stats
+
     def update_client(self, email: str, client_payload: dict[str, Any]) -> dict[str, Any]:
         body = dict(client_payload)
         body['email'] = email
