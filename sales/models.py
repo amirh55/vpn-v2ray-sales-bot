@@ -130,6 +130,21 @@ class SiteSetting(TimeStampedModel):
         ),
     )
 
+    welcome_text = models.TextField(
+        'پیام خوش‌آمدگویی ربات',
+        blank=True,
+        default=(
+            'سلام {name} 🌿\n'
+            'به <b>{shop}</b> خوش آمدید.\n\n'
+            'برای شروع، از دکمه‌های پایین یکی را انتخاب کنید. 👇'
+        ),
+        help_text=(
+            'می‌توانید ایموجی بگذارید. متغیرها: {name} نام کاربر، {shop} نام فروشگاه، '
+            '{username} یوزرنیم تلگرام، {balance} موجودی کیف پول. '
+            'تگ‌های &lt;b&gt; و &lt;i&gt; و &lt;code&gt; هم کار می‌کنند.'
+        ),
+    )
+
     tutorial_text = models.TextField('متن آموزش اتصال', blank=True, default='آموزش اتصال را از این بخش تنظیم کنید.')
     contact_intro_text = models.TextField('متن بخش ارتباط با ما', blank=True, default='پیام خود را ارسال کنید. پشتیبانی پاسخ شما را بررسی می‌کند.')
     faq_intro_text = models.TextField(
@@ -189,6 +204,52 @@ class XUIPanel(TimeStampedModel):
     openapi_add_client_path = models.CharField('مسیر ساخت کلاینت در این پنل', max_length=200, blank=True)
     openapi_note = models.CharField('نتیجه آخرین خواندن ساختار API', max_length=300, blank=True)
 
+    # Inbounds read from the panel, so a service can be built by ticking boxes
+    # instead of the operator copying numbers by hand. Cached rather than
+    # fetched per form render: the admin must not hang when a panel is down.
+    inbounds_cache = models.JSONField('اینباندهای خوانده‌شده از پنل', default=list, blank=True)
+    inbounds_fetched_at = models.DateTimeField('زمان خواندن اینباندها', null=True, blank=True)
+
+    class SubMode(models.TextChoices):
+        AUTO = 'auto', 'خودکار از روی تنظیمات خود پنل'
+        MANUAL = 'manual', 'دستی، با مقادیر زیر'
+        OFF = 'off', 'لینک Subscription داده نشود'
+
+    class Scheme(models.TextChoices):
+        HTTPS = 'https', 'https'
+        HTTP = 'http', 'http'
+
+    # 3x-ui serves subscriptions from a second HTTP server on its own port and
+    # path. The panel knows all of it, so the default is to ask; the manual
+    # fields exist for installs where that section was never filled in.
+    sub_mode = models.CharField(
+        'روش ساخت لینک Subscription',
+        max_length=10,
+        choices=SubMode.choices,
+        default=SubMode.AUTO,
+        help_text='خودکار یعنی از «تنظیمات ← Subscription» همین پنل خوانده شود.',
+    )
+    sub_scheme = models.CharField('پروتکل Subscription', max_length=5, choices=Scheme.choices, default=Scheme.HTTPS)
+    sub_domain = models.CharField(
+        'دامنه Subscription',
+        max_length=255,
+        blank=True,
+        help_text='خالی یعنی همان دامنه‌ی آدرس پنل استفاده شود.',
+    )
+    sub_port = models.PositiveIntegerField(
+        'پورت Subscription',
+        default=2096,
+        help_text='پورتی که در تنظیمات Subscription پنل انتخاب کرده‌اید. پیش‌فرض 3x-ui معمولا 2096 یا 10882 است.',
+    )
+    sub_path = models.CharField(
+        'مسیر Subscription',
+        max_length=120,
+        default='/sub/',
+        help_text='با اسلش شروع و تمام شود. مثل /sub/',
+    )
+    sub_detected = models.JSONField('تنظیمات Subscription خوانده‌شده از پنل', default=dict, blank=True)
+    sub_note = models.CharField('نتیجه آخرین خواندن تنظیمات Subscription', max_length=300, blank=True)
+
     class Meta:
         verbose_name = 'پنل سنایی / 3x-ui'
         verbose_name_plural = 'پنل‌های سنایی / 3x-ui'
@@ -196,12 +257,69 @@ class XUIPanel(TimeStampedModel):
     def __str__(self) -> str:
         return self.name
 
+    def host(self) -> str:
+        """The panel's hostname, without scheme, path or port."""
+        raw = (self.base_url or '').split('://', 1)[-1]
+        return raw.split('/', 1)[0].split(':', 1)[0]
+
+    def subscription_settings(self) -> dict:
+        """Scheme, host, port and path to build a subscription URL from.
+
+        Auto mode uses what was read from the panel and falls back to the manual
+        fields for anything the panel did not report, so a half-answered panel
+        still produces a usable link instead of nothing.
+        """
+        detected = self.sub_detected if isinstance(self.sub_detected, dict) else {}
+        if self.sub_mode == self.SubMode.MANUAL:
+            detected = {}
+        return {
+            'scheme': detected.get('scheme') or self.sub_scheme or 'https',
+            'domain': detected.get('domain') or self.sub_domain or self.host(),
+            'port': int(detected.get('port') or self.sub_port or 0),
+            'path': detected.get('path') or self.sub_path or '/sub/',
+        }
+
+    def subscription_url(self, sub_id: str) -> str:
+        """Where a customer's subscription lives, or empty when turned off."""
+        if self.sub_mode == self.SubMode.OFF or not sub_id:
+            return ''
+
+        parts = self.subscription_settings()
+
+        # A base URL typed in by hand on an older install still wins, because
+        # somebody put it there deliberately. The path is appended the way it
+        # always was, unless the operator already included it themselves.
+        legacy = (self.subscription_base_url or '').strip().rstrip('/')
+        if legacy and self.sub_mode == self.SubMode.MANUAL:
+            path = '/' + (parts['path'] or '/sub/').strip('/')
+            if legacy.endswith(path):
+                return f'{legacy}/{sub_id}'
+            return f'{legacy}{path}/{sub_id}'
+
+        domain = (parts['domain'] or '').strip().strip('/')
+        if not domain:
+            return ''
+        scheme = parts['scheme']
+        port = int(parts['port'] or 0)
+        default_port = 443 if scheme == 'https' else 80
+        host = domain if port in (0, default_port) else f'{domain}:{port}'
+        path = '/' + (parts['path'] or '/sub/').strip('/') + '/'
+        return f'{scheme}://{host}{path}{sub_id}'
+
 
 class Service(TimeStampedModel):
     name = models.CharField('نام سرویس', max_length=120)
     description = models.TextField('توضیحات سرویس', blank=True)
     panel = models.ForeignKey(XUIPanel, verbose_name='پنل 3x-ui', on_delete=models.PROTECT)
-    inbound_id = models.PositiveIntegerField('شناسه Inbound در پنل 3x-ui')
+    # One service can span several inbounds. The client is created once and
+    # attached to all of them, so the customer gets one config per route and
+    # their app can fall back when one is blocked.
+    inbound_ids = models.CharField(
+        'شناسه‌های Inbound در پنل 3x-ui',
+        max_length=200,
+        default='',
+        help_text='یک یا چند شناسه، با کاما جدا شده. مثل: 1,3,5',
+    )
     inbound_remark = models.CharField('نام/Remark اینباند برای یادآوری', max_length=150, blank=True)
     sort_order = models.PositiveIntegerField('ترتیب نمایش', default=10)
     is_active = models.BooleanField('فعال', default=True)
@@ -225,6 +343,27 @@ class Service(TimeStampedModel):
 
     def __str__(self) -> str:
         return self.name
+
+    def inbound_id_list(self) -> list[int]:
+        """The inbound ids, cleaned of duplicates and anything unparsable."""
+        found = []
+        for chunk in str(self.inbound_ids or '').replace('،', ',').split(','):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                value = int(chunk)
+            except ValueError:
+                continue
+            if value > 0 and value not in found:
+                found.append(value)
+        return found
+
+    @property
+    def inbound_id(self) -> int:
+        """First inbound, for the places that can only mean one of them."""
+        ids = self.inbound_id_list()
+        return ids[0] if ids else 0
 
 
 class Plan(TimeStampedModel):

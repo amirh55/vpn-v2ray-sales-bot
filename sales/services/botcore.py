@@ -304,14 +304,38 @@ def plan_screen(bot: TeleBot, user: TelegramUser, plan: Plan, call=None, chat_id
     send_or_edit(bot, chat_id or (call.message.chat.id if call else user.chat_id), text, inline(rows), call=call)
 
 
-def send_main_menu(bot: TeleBot, chat_id: int):
-    site = get_site()
-    text = (
-        f'سلام 🌿\n'
-        f'به <b>{site.title}</b> خوش آمدید.\n'
-        f'دکمه‌های اصلی ربات از منوی پایین تلگرام در دسترس هستند.'
+DEFAULT_WELCOME = (
+    'سلام {name} 🌿\n'
+    'به <b>{shop}</b> خوش آمدید.\n\n'
+    'برای شروع، از دکمه‌های پایین یکی را انتخاب کنید. 👇'
+)
+
+
+def welcome_message(site: SiteSetting, user: TelegramUser | None = None) -> str:
+    """The operator's welcome text with the customer's details filled in.
+
+    A mistyped placeholder must not stop the bot greeting anyone, so anything
+    unrecognised leaves the text as written rather than raising.
+    """
+    template = (site.welcome_text or '').strip() or DEFAULT_WELCOME
+    values = {
+        'shop': site.title,
+        'name': ((user.first_name or user.username or '').strip() if user else ''),
+        'username': (f'@{user.username}' if user and user.username else ''),
+        'balance': toman(user.wallet_balance_toman) if user else toman(0),
+    }
+    try:
+        return template.format(**values)
+    except (KeyError, IndexError, ValueError):
+        return template
+
+
+def send_main_menu(bot: TeleBot, chat_id: int, user: TelegramUser | None = None):
+    bot.send_message(
+        chat_id,
+        welcome_message(get_site(), user),
+        reply_markup=main_reply_keyboard(),
     )
-    bot.send_message(chat_id, text, reply_markup=main_reply_keyboard())
 
 
 def edit_or_send(bot: TeleBot, call, text: str, kb=None):
@@ -661,7 +685,7 @@ def route_main_action(bot: TeleBot, user: TelegramUser, chat_id: int, action: st
     elif action == 'contact':
         show_contact(bot, user, chat_id)
     else:
-        send_main_menu(bot, chat_id)
+        send_main_menu(bot, chat_id, user)
 
 
 def notify_auto_approved_cards(bot: TeleBot):
@@ -810,7 +834,7 @@ def register_handlers(bot: TeleBot) -> None:
     def start(message):
         user = ensure_user_from_message(message)
         reset_user_state(user)
-        send_main_menu(bot, message.chat.id)
+        send_main_menu(bot, message.chat.id, user)
 
     @bot.message_handler(commands=['id'])
     def whoami(message):
@@ -843,7 +867,7 @@ def register_handlers(bot: TeleBot) -> None:
             return
         if text_value in {BTN_CANCEL, 'لغو', 'انصراف', '🏠 منوی اصلی'}:
             reset_user_state(user)
-            send_main_menu(bot, message.chat.id)
+            send_main_menu(bot, message.chat.id, user)
             return
 
         state = user.state or ''
@@ -1016,7 +1040,7 @@ def register_handlers(bot: TeleBot) -> None:
             bot.send_message(message.chat.id, reply, reply_markup=main_reply_keyboard())
             return
 
-        send_main_menu(bot, message.chat.id)
+        send_main_menu(bot, message.chat.id, user)
 
     @bot.callback_query_handler(func=lambda call: True)
     def callback(call):

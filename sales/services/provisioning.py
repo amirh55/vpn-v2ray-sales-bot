@@ -27,6 +27,7 @@ def render_template(template: str, *, order: Order, client_uuid: str, client_ema
         'client_id': client_uuid,
         'email': client_email,
         'inbound_id': order.service.inbound_id,
+        'inbound_ids': ','.join(str(i) for i in order.service.inbound_id_list()),
         'panel_base_url': panel.base_url.rstrip('/'),
         'subscription_base_url': (panel.subscription_base_url or panel.base_url).rstrip('/'),
         'service_name': order.service.name,
@@ -105,10 +106,9 @@ def build_links(order: Order, xui: 'XUIClient', *, client_uuid: str, client_emai
         config_link = '\n'.join(links)
 
     if not subscription_link:
-        panel = order.service.panel
-        base = (panel.subscription_base_url or '').strip().rstrip('/')
-        if base:
-            subscription_link = f'{base}/sub/{client_email}'
+        # subId is what the panel keys a subscription on, and provisioning sets
+        # it to the client's name, so the customer's chosen name is the link.
+        subscription_link = order.service.panel.subscription_url(client_email)
 
     return config_link, subscription_link
 
@@ -186,7 +186,7 @@ def provision_order(order: Order) -> Order:
 
     payload = build_client_payload(order, client_uuid, client_email, expires_at)
     xui = XUIClient(order.service.panel)
-    xui_result = xui.add_client(order.service.inbound_id, payload)
+    xui_result = xui.add_client(order.service.inbound_id_list(), payload)
     actual_uuid = str(xui_result.get('client_uuid') or '').strip()
     if actual_uuid:
         client_uuid = actual_uuid

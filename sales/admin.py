@@ -153,13 +153,52 @@ class SiteSettingAdmin(ModelAdmin):
         ('تایید خودکار با پیامک بانکی', {
             'fields': ('card_auto_confirm_enabled', 'sms_webhook_secret', 'sms_allowed_senders', 'sms_webhook_url'),
         }),
+        ('پیام خوش‌آمدگویی', {
+            'fields': ('welcome_text', 'welcome_preview'),
+            'description': (
+                'این پیام با /start و با بازگشت به منوی اصلی نمایش داده می‌شود. '
+                'ایموجی آزاد است. متغیرها: {name} نام کاربر، {shop} نام فروشگاه، '
+                '{username} یوزرنیم، {balance} موجودی کیف پول.'
+            ),
+        }),
         ('متن‌ها', {'fields': ('tutorial_text', 'contact_intro_text', 'faq_intro_text', 'after_purchase_text')}),
         ('پشتیبان‌گیری', {'fields': ('backup_tools',)}),
     )
 
     readonly_fields = (
         'sms_webhook_url', 'backup_tools', 'domain_tools', 'telegram_webhook_info', 'report_tools',
+        'welcome_preview',
     )
+
+    @admin.display(description='پیش‌نمایش')
+    def welcome_preview(self, obj):
+        """Show the greeting as a customer would receive it.
+
+        Placeholders are easy to mistype and the mistake is otherwise only
+        visible in Telegram, so it is rendered here with sample values.
+        """
+        if not obj or not obj.pk:
+            return 'بعد از ذخیره نمایش داده می‌شود'
+        from .services.botcore import welcome_message
+
+        sample = TelegramUser(chat_id=0, first_name='علی', username='ali', wallet_balance_toman=250000)
+        rendered = welcome_message(obj, sample)
+        unknown = [
+            piece.split('}')[0]
+            for piece in (obj.welcome_text or '').split('{')[1:]
+            if '}' in piece and piece.split('}')[0] not in ('name', 'shop', 'username', 'balance')
+        ]
+        note = ''
+        if unknown:
+            note = (
+                '<br><span style="color:#b45309;">⚠️ این متغیرها شناخته‌شده نیستند و '
+                f'همان‌طور که هستند نمایش داده می‌شوند: {escape("، ".join(unknown))}</span>'
+            )
+        return mark_safe(  # noqa: S308 - operator's own text, shown back to them
+            '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;'
+            'padding:12px;max-width:520px;white-space:pre-wrap;line-height:2;">'
+            f'{rendered}</div>{note}'
+        )
 
     @admin.display(description='دامنه و SSL')
     def domain_tools(self, obj):
@@ -521,16 +560,64 @@ def refresh_panel_openapi(modeladmin, request, queryset):
         messages.info(request, 'ساخت سرویس همچنان کار می‌کند؛ فقط از مسیر حدس‌وآزمون قبلی.')
 
 
+@admin.action(description='📡 خواندن فهرست اینباندها از پنل')
+def refresh_panel_inbounds(modeladmin, request, queryset):
+    """Cache each panel's inbounds so services can be built by ticking boxes."""
+    for panel in queryset:
+        try:
+            rows = XUIClient(panel).refresh_inbounds()
+        except XUIError as exc:
+            messages.error(request, f'{panel.name}: خواندن اینباندها ناموفق بود ({exc})')
+            continue
+        messages.success(request, f'{panel.name}: {len(rows)} اینباند خوانده شد.')
+
+
+@admin.action(description='🔗 خواندن تنظیمات Subscription از پنل')
+def refresh_panel_subscription(modeladmin, request, queryset):
+    """Read where the panel serves subscriptions from, instead of asking."""
+    for panel in queryset:
+        try:
+            XUIClient(panel).detect_subscription()
+        except XUIError as exc:
+            messages.warning(
+                request,
+                f'{panel.name}: تنظیمات Subscription خوانده نشد ({exc}). '
+                'می‌توانید روش را «دستی» بگذارید و پورت و دامنه را خودتان وارد کنید.',
+            )
+            continue
+        panel.refresh_from_db()
+        messages.success(request, f'{panel.name}: {panel.sub_note}')
+
+
 @admin.register(XUIPanel)
 class XUIPanelAdmin(ModelAdmin):
     list_display = ('name', 'base_url', 'api_base_path', 'api_mode', 'is_active', 'updated_at')
     list_filter = ('is_active', 'verify_ssl')
     search_fields = ('name', 'base_url')
-    actions = [refresh_panel_openapi]
-    readonly_fields = ('openapi_fetched_at', 'openapi_add_client_path', 'openapi_note', 'openapi_summary')
+    actions = [refresh_panel_openapi, refresh_panel_inbounds, refresh_panel_subscription]
+    readonly_fields = (
+        'openapi_fetched_at', 'openapi_add_client_path', 'openapi_note', 'openapi_summary',
+        'inbounds_fetched_at', 'inbounds_table', 'sub_note', 'sub_preview',
+    )
     fieldsets = (
-        ('اتصال', {'fields': ('name', 'base_url', 'api_token', 'api_base_path', 'subscription_base_url')}),
+        ('اتصال', {'fields': ('name', 'base_url', 'api_token', 'api_base_path')}),
         ('تنظیمات ارتباط', {'fields': ('verify_ssl', 'timeout_seconds', 'is_active')}),
+        ('اینباندها', {
+            'fields': ('inbounds_table', 'inbounds_fetched_at'),
+            'description': (
+                'از منوی «عملیات» در فهرست پنل‌ها، گزینه «خواندن فهرست اینباندها از پنل» را بزنید. '
+                'بعد از آن، هنگام ساخت سرویس می‌توانید اینباندها را تیک بزنید.'
+            ),
+        }),
+        ('لینک Subscription', {
+            'fields': ('sub_mode', 'sub_preview', 'sub_scheme', 'sub_domain', 'sub_port', 'sub_path',
+                       'subscription_base_url', 'sub_note'),
+            'description': (
+                'در حالت خودکار، پورت و مسیر از «تنظیمات ← Subscription» خود پنل خوانده می‌شود '
+                '(از منوی عملیات، «خواندن تنظیمات Subscription از پنل»). '
+                'اگر آن بخش را در x-ui تنظیم نکرده‌اید، روش را «دستی» بگذارید و مقادیر زیر را پر کنید.'
+            ),
+        }),
         ('ساختار API این پنل', {
             'fields': ('openapi_summary', 'openapi_add_client_path', 'openapi_fetched_at', 'openapi_note'),
             'description': (
@@ -557,6 +644,47 @@ class XUIPanelAdmin(ModelAdmin):
         paths = (obj.openapi_schema or {}).get('paths') or {}
         return f'✅ {len(paths)} مسیر شناخته شد. ساخت کلاینت از: {obj.openapi_add_client_path}'
 
+    @admin.display(description='اینباندهای این پنل')
+    def inbounds_table(self, obj):
+        rows = obj.inbounds_cache if isinstance(obj.inbounds_cache, list) else []
+        if not rows:
+            return 'هنوز خوانده نشده. از فهرست پنل‌ها، اکشن «خواندن فهرست اینباندها از پنل» را اجرا کنید.'
+        cells = ''.join(
+            '<tr>'
+            f'<td style="padding:4px 10px;"><code>{int(row.get("id") or 0)}</code></td>'
+            f'<td style="padding:4px 10px;">{escape(str(row.get("remark") or "-"))}</td>'
+            f'<td style="padding:4px 10px;">{escape(str(row.get("protocol") or "-"))}</td>'
+            f'<td style="padding:4px 10px;">{int(row.get("port") or 0)}</td>'
+            f'<td style="padding:4px 10px;">{"فعال" if row.get("enable", True) else "غیرفعال"}</td>'
+            '</tr>'
+            for row in rows
+        )
+        return mark_safe(  # noqa: S308 - values come from the panel and are escaped
+            '<table style="border-collapse:collapse;"><thead><tr>'
+            '<th style="padding:4px 10px;text-align:right;">شناسه</th>'
+            '<th style="padding:4px 10px;text-align:right;">نام</th>'
+            '<th style="padding:4px 10px;text-align:right;">پروتکل</th>'
+            '<th style="padding:4px 10px;text-align:right;">پورت</th>'
+            '<th style="padding:4px 10px;text-align:right;">وضعیت</th>'
+            f'</tr></thead><tbody>{cells}</tbody></table>'
+        )
+
+    @admin.display(description='نمونه لینک Subscription')
+    def sub_preview(self, obj):
+        if not obj or not obj.pk:
+            return 'بعد از ذخیره نمایش داده می‌شود'
+        if obj.sub_mode == XUIPanel.SubMode.OFF:
+            return 'برای این پنل لینک Subscription ساخته نمی‌شود.'
+        sample = obj.subscription_url('CLIENT_NAME')
+        if not sample:
+            return '⚠️ با تنظیمات فعلی لینکی ساخته نمی‌شود. دامنه را وارد کنید یا روش را «دستی» بگذارید.'
+        parts = obj.subscription_settings()
+        return mark_safe(  # noqa: S308 - a URL this code assembled
+            f'<code style="user-select:all;word-break:break-all;">{escape(sample)}</code><br>'
+            f'<span style="color:#64748b;">پروتکل {escape(parts["scheme"])} · '
+            f'پورت {int(parts["port"])} · مسیر {escape(parts["path"])}</span>'
+        )
+
 
 class PlanInline(TabularInline):
     model = Plan
@@ -564,16 +692,93 @@ class PlanInline(TabularInline):
     fields = ('name', 'price_toman', 'price_usd', 'duration_days', 'traffic_gb', 'user_limit', 'sort_order', 'is_active')
 
 
+class ServiceForm(forms.ModelForm):
+    """Pick inbounds by ticking them, when the panel's list has been read.
+
+    The list is whatever the panel last reported, never a live call: rendering
+    this form must not hang because a panel is unreachable. With no cached list
+    the field stays a plain text box, so a panel that cannot be read never
+    blocks the operator from defining a service.
+    """
+
+    class Meta:
+        model = Service
+        fields = '__all__'
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        panel = getattr(self.instance, 'panel', None)
+        rows = getattr(panel, 'inbounds_cache', None) if panel else None
+        if not isinstance(rows, list) or not rows:
+            return
+
+        choices = []
+        for row in rows:
+            inbound_id = int(row.get('id') or 0)
+            if inbound_id <= 0:
+                continue
+            label = f'{inbound_id} — {row.get("remark") or "بدون نام"}'
+            extra = ' / '.join(str(v) for v in (row.get('protocol'), row.get('port')) if v)
+            if extra:
+                label += f' ({extra})'
+            if not row.get('enable', True):
+                label += ' — غیرفعال'
+            choices.append((str(inbound_id), label))
+
+        self.fields['inbound_ids'] = forms.MultipleChoiceField(
+            label='اینباندهای این سرویس',
+            choices=choices,
+            required=True,
+            widget=forms.CheckboxSelectMultiple,
+            help_text='می‌توانید چند اینباند انتخاب کنید. کانفیگ هر کدام جداگانه به مشتری داده می‌شود.',
+            initial=[str(i) for i in self.instance.inbound_id_list()],
+        )
+
+    def clean_inbound_ids(self):
+        value = self.cleaned_data.get('inbound_ids')
+        if isinstance(value, (list, tuple)):
+            value = ','.join(str(v) for v in value)
+        cleaned = Service(inbound_ids=value).inbound_id_list()
+        if not cleaned:
+            raise forms.ValidationError('حداقل یک شناسه Inbound معتبر وارد کنید. مثل: 1,3')
+        return ','.join(str(i) for i in cleaned)
+
+
 @admin.register(Service)
 class ServiceAdmin(ModelAdmin):
-    list_display = ('name', 'panel', 'inbound_id', 'inbound_remark', 'sort_order', 'is_active')
+    form = ServiceForm
+    list_display = ('name', 'panel', 'inbound_summary', 'inbound_remark', 'sort_order', 'is_active')
     list_filter = ('is_active', 'panel')
     search_fields = ('name', 'description', 'inbound_remark')
     inlines = [PlanInline]
+    readonly_fields = ('link_mode',)
     fieldsets = (
-        ('اطلاعات سرویس', {'fields': ('name', 'description', 'panel', 'inbound_id', 'inbound_remark', 'sort_order', 'is_active')}),
-        ('قالب تحویل لینک‌ها', {'fields': ('config_link_template', 'subscription_link_template')}),
+        ('اطلاعات سرویس', {'fields': ('name', 'description', 'panel', 'inbound_ids', 'inbound_remark', 'sort_order', 'is_active')}),
+        ('قالب تحویل لینک‌ها', {
+            'fields': ('link_mode', 'config_link_template', 'subscription_link_template'),
+            'classes': ('collapse',),
+            'description': (
+                'این دو را خالی بگذارید. لینک کانفیگ مستقیماً از خود پنل گرفته می‌شود و '
+                'لینک Subscription از تنظیمات همان پنل ساخته می‌شود. '
+                'فقط اگر شکل خاصی از لینک لازم دارید اینجا را پر کنید.'
+            ),
+        }),
     )
+
+    @admin.display(description='اینباندها')
+    def inbound_summary(self, obj):
+        ids = obj.inbound_id_list()
+        if not ids:
+            return '⚠️ تعریف نشده'
+        return f'{len(ids)} اینباند: ' + '، '.join(str(i) for i in ids)
+
+    @admin.display(description='روش ساخت لینک')
+    def link_mode(self, obj):
+        if not obj or not obj.pk:
+            return 'بعد از ذخیره نمایش داده می‌شود'
+        config = 'قالب دستی' if obj.config_link_template else 'خودکار از پنل'
+        sub = 'قالب دستی' if obj.subscription_link_template else 'خودکار از تنظیمات پنل'
+        return f'کانفیگ: {config} · Subscription: {sub}'
 
 
 @admin.register(Plan)

@@ -298,7 +298,7 @@ class XUIClient:
         self,
         schema: dict[str, Any],
         path: str,
-        inbound_id: int,
+        inbound_ids,
         client_payload: dict[str, Any],
     ) -> dict[str, Any] | None:
         """Shape the request body to match what this panel's schema declares.
@@ -326,14 +326,15 @@ class XUIClient:
 
         if client_key:
             # 3.x shape: {"client": {...}, "inboundIds": [n]}
-            client = self._client_v3_payloads(inbound_id, client_payload)[0]['client']
+            client = self._client_v3_payloads(inbound_ids, client_payload)[0]['client']
             body: dict[str, Any] = {keys[client_key]: client}
             if inbound_key:
                 target = keys[inbound_key]
                 declared = self._resolve_ref(schema, props.get(target) or {})
-                body[target] = (
-                    [int(inbound_id)] if str(declared.get('type')) == 'array' else int(inbound_id)
-                )
+                ids = self._as_inbound_list(inbound_ids)
+                # A schema that wants a single id can only be given one, so the
+                # rest are attached separately after the client exists.
+                body[target] = ids if str(declared.get('type')) == 'array' else (ids[0] if ids else 0)
             return body
 
         if 'settings' in lowered:
@@ -343,7 +344,8 @@ class XUIClient:
             )
             body = {keys[lowered['settings']]: settings_json}
             if inbound_key:
-                body[keys[inbound_key]] = int(inbound_id)
+                ids = self._as_inbound_list(inbound_ids)
+                body[keys[inbound_key]] = ids[0] if ids else 0
             return body
 
         return None
@@ -398,7 +400,7 @@ class XUIClient:
         ])
         return schema
 
-    def _add_client_from_schema(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
+    def _add_client_from_schema(self, inbound_ids, client_payload: dict[str, Any]) -> dict[str, Any]:
         """Create the client using the endpoint and body the panel documents."""
         schema = self.load_schema()
         if not schema:
@@ -407,7 +409,7 @@ class XUIClient:
         if not path:
             raise XUIError('مسیر ساخت کلاینت در ساختار API این پنل پیدا نشد.')
 
-        body = self._payload_from_schema(schema, path, inbound_id, client_payload)
+        body = self._payload_from_schema(schema, path, inbound_ids, client_payload)
         if body is None:
             raise XUIError(f'ساختار بدنه‌ی {path} شناخته‌شده نیست.')
 
@@ -533,7 +535,24 @@ class XUIClient:
                 }
         return None
 
-    def _client_v3_payloads(self, inbound_id: int, client_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _as_inbound_list(inbound_ids) -> list[int]:
+        """Accept one inbound or several, always work with a list."""
+        if isinstance(inbound_ids, (list, tuple, set)):
+            values = list(inbound_ids)
+        else:
+            values = [inbound_ids]
+        found = []
+        for value in values:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0 and number not in found:
+                found.append(number)
+        return found
+
+    def _client_v3_payloads(self, inbound_ids, client_payload: dict[str, Any]) -> list[dict[str, Any]]:
         """Return payloads for current 3x-ui 3.x Clients API.
 
         In 3x-ui v3.3.x the router is POST /panel/api/clients/add and the
@@ -579,11 +598,12 @@ class XUIClient:
         if supplied_id:
             client_with_id['id'] = supplied_id
 
+        ids = self._as_inbound_list(inbound_ids)
         return [
-            {'client': client, 'inboundIds': [int(inbound_id)]},
-            {'client': client_with_id, 'inboundIds': [int(inbound_id)]},
-            {'Client': client, 'InboundIds': [int(inbound_id)]},
-            {'client': client, 'inbounds': [int(inbound_id)]},
+            {'client': client, 'inboundIds': ids},
+            {'client': client_with_id, 'inboundIds': ids},
+            {'Client': client, 'InboundIds': ids},
+            {'client': client, 'inbounds': ids},
         ]
 
     def _attach_client_to_inbound(self, email: str, inbound_id: int) -> dict[str, Any]:
@@ -615,14 +635,14 @@ class XUIClient:
                     last_error = exc
         raise XUIError(f'اتصال کلاینت به inbound ناموفق بود: {last_error}')
 
-    def _add_client_v3(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
+    def _add_client_v3(self, inbound_ids, client_payload: dict[str, Any]) -> dict[str, Any]:
         email = str(client_payload['email']).strip()
 
         # The API Docs exported from the target panel expose POST /panel/api/clients/add.
         # There is no documented POST /panel/api/clients route, so do not call it here.
         # The previous fallback to /clients made the final error misleading and could
         # hide the real /clients/add response.
-        primary_payloads = self._client_v3_payloads(inbound_id, client_payload)
+        primary_payloads = self._client_v3_payloads(inbound_ids, client_payload)
         attempts: list[str] = []
 
         for payload in primary_payloads:
@@ -674,10 +694,13 @@ class XUIClient:
 
         raise XUIError(' | '.join(attempts[-10:]))
 
-    def _add_client_legacy(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
+    def _add_client_legacy(self, inbound_ids, client_payload: dict[str, Any]) -> dict[str, Any]:
         settings_obj = {'clients': [client_payload]}
         settings_json = json.dumps(settings_obj, ensure_ascii=False, separators=(',', ':'))
-        legacy_body = {'id': int(inbound_id), 'settings': settings_json}
+        ids = self._as_inbound_list(inbound_ids)
+        # The 2.x API is inbound-scoped and can only take one at a time; the
+        # caller attaches the remaining inbounds afterwards.
+        legacy_body = {'id': ids[0] if ids else 0, 'settings': settings_json}
         attempts = [
             ('POST', self._api_url('/inbounds/addClient'), {'json': legacy_body, 'headers': {'Content-Type': 'application/json'}}),
             ('POST', self._api_url('/inbound/addClient'), {'json': legacy_body, 'headers': {'Content-Type': 'application/json'}}),
@@ -699,7 +722,7 @@ class XUIClient:
                 last_error = exc
         raise XUIError(str(last_error))
 
-    def add_client(self, inbound_id: int, client_payload: dict[str, Any]) -> dict[str, Any]:
+    def add_client(self, inbound_ids, client_payload: dict[str, Any]) -> dict[str, Any]:
         email = str(client_payload.get('email') or '').strip()
         if not email:
             raise XUIError('client email برای ساخت کلاینت در 3x-ui خالی است.')
@@ -718,32 +741,224 @@ class XUIClient:
             except (TypeError, ValueError):
                 client_payload[int_key] = 0
 
+        ids = self._as_inbound_list(inbound_ids)
+        if not ids:
+            raise XUIError('هیچ شناسه Inbound معتبری برای این سرویس تعریف نشده است.')
+
         errors: list[str] = []
+        result = None
         # The panel's own schema is the only source that is right by
         # construction, so it goes first. Everything after it is a guess kept
         # for panels that publish no schema.
-        try:
-            return self._add_client_from_schema(inbound_id, client_payload)
-        except XUIError as exc:
-            errors.append(f'openapi: {exc}')
+        for label, attempt in (
+            ('openapi', self._add_client_from_schema),
+            ('clients-v3', self._add_client_v3),
+            ('inbound-legacy', self._add_client_legacy),
+        ):
+            try:
+                result = attempt(ids, client_payload)
+                break
+            except XUIError as exc:
+                errors.append(f'{label}: {exc}')
 
-        # Prefer 3.x global client API because current 3x-ui versions moved user
-        # management to /panel/api/clients and attach clients to inbounds.
+        if result is None:
+            raise XUIError(
+                'ساخت کلاینت در 3x-ui ناموفق بود. '
+                f'email={email}, inbound_ids={ids}. '
+                'خطاها: ' + ' | '.join(errors[-6:])
+            )
+
+        # Whether every inbound was covered depends on which path answered: the
+        # v3 API takes the whole list, the older ones take one. Rather than
+        # guess, ask the panel which inbounds the client ended up on and attach
+        # whatever is missing.
+        result['inbound_ids'] = ids
+        missing = self._inbounds_missing_for(email, ids)
+        for inbound in missing:
+            try:
+                self._attach_client_to_inbound(email, inbound)
+            except XUIError as exc:
+                errors.append(f'attach {inbound}: {exc}')
+        if missing:
+            result['attached_extra'] = [i for i in missing]
+        if errors:
+            result['warnings'] = errors[-4:]
+        return result
+
+    def _inbounds_missing_for(self, email: str, wanted: list[int]) -> list[int]:
+        """Which of the wanted inbounds this client is not on yet.
+
+        Returns nothing when the panel cannot be read: attaching blindly would
+        be worse than leaving a client that is already correct alone.
+        """
+        if len(wanted) <= 1:
+            return []
         try:
-            return self._add_client_v3(inbound_id, client_payload)
-        except XUIError as exc:
-            errors.append(f'clients-v3: {exc}')
+            current = set(self.client_inbound_ids(email))
+        except XUIError:
+            return []
+        if not current:
+            return []
+        return [i for i in wanted if i not in current]
+
+    def client_inbound_ids(self, email: str) -> list[int]:
+        """The inbounds a client is currently attached to."""
+        found: list[int] = []
+
+        def collect(value):
+            if isinstance(value, list):
+                for item in value:
+                    try:
+                        number = int(item)
+                    except (TypeError, ValueError):
+                        continue
+                    if number > 0 and number not in found:
+                        found.append(number)
+
+        result = self.get_client(email)
+        for holder in (result, result.get('obj') if isinstance(result, dict) else None):
+            if isinstance(holder, dict):
+                for key in ('inboundIds', 'inbound_ids', 'inbounds'):
+                    collect(holder.get(key))
+        return found
+
+    def list_inbounds_brief(self) -> list[dict[str, Any]]:
+        """Every inbound as {id, remark, protocol, port}, for picking in the panel."""
+        rows = []
+        for inbound in self._as_list(self.list_inbounds()):
+            try:
+                inbound_id = int(inbound.get('id') or 0)
+            except (TypeError, ValueError):
+                continue
+            if inbound_id <= 0:
+                continue
+            rows.append({
+                'id': inbound_id,
+                'remark': str(inbound.get('remark') or '').strip(),
+                'protocol': str(inbound.get('protocol') or '').strip(),
+                'port': int(inbound.get('port') or 0),
+                'enable': bool(inbound.get('enable', True)),
+            })
+        rows.sort(key=lambda row: row['id'])
+        return rows
+
+    def refresh_inbounds(self) -> list[dict[str, Any]]:
+        """Read the inbound list and remember it on the panel row."""
+        from django.utils import timezone
+
+        rows = self.list_inbounds_brief()
+        self.panel.inbounds_cache = rows
+        self.panel.inbounds_fetched_at = timezone.now()
+        self.panel.save(update_fields=['inbounds_cache', 'inbounds_fetched_at', 'updated_at'])
+        return rows
+
+    def get_settings(self) -> dict[str, Any]:
+        """The panel's own settings blob, which includes the subscription server."""
+        last_error = None
+        for path in ('/setting/all', '/settings/all', '/setting'):
+            try:
+                result = self.request('POST', self._api_url(path))
+            except XUIError as exc:
+                last_error = exc
+                try:
+                    result = self.request('GET', self._api_url(path))
+                except XUIError as exc2:
+                    last_error = exc2
+                    continue
+            if isinstance(result, dict) and self._ok(result):
+                inner = result.get('obj')
+                return inner if isinstance(inner, dict) else result
+        raise XUIError(f'خواندن تنظیمات پنل ناموفق بود: {last_error}')
+
+    # The subscription section of 3x-ui has had several spellings across
+    # versions and forks, so each value is looked up under all of them.
+    SUB_KEYS = {
+        'enable': ('subEnable', 'subscriptionEnable', 'sub_enable'),
+        'port': ('subPort', 'subscriptionPort', 'sub_port'),
+        'path': ('subPath', 'subscriptionPath', 'sub_path'),
+        'domain': ('subDomain', 'subscriptionDomain', 'sub_domain'),
+        'uri': ('subURI', 'subUri', 'subscriptionURI', 'sub_uri'),
+        'cert': ('subCertFile', 'subscriptionCertFile', 'sub_cert_file'),
+    }
+
+    @classmethod
+    def _pick(cls, blob: dict[str, Any], names: tuple[str, ...]):
+        for name in names:
+            if name in blob and blob[name] not in (None, ''):
+                return blob[name]
+        # Some builds nest everything one level down.
+        for value in blob.values():
+            if isinstance(value, dict):
+                found = cls._pick(value, names)
+                if found not in (None, ''):
+                    return found
+        return None
+
+    def detect_subscription(self) -> dict[str, Any]:
+        """Work out where this panel serves subscriptions from.
+
+        The panel publishes it, so reading beats asking the operator to retype
+        a port and a path they already configured once.
+        """
+        from django.utils import timezone
 
         try:
-            return self._add_client_legacy(inbound_id, client_payload)
+            blob = self.get_settings()
         except XUIError as exc:
-            errors.append(f'inbound-legacy: {exc}')
+            self.panel.sub_note = str(exc)[:300]
+            self.panel.save(update_fields=['sub_note', 'updated_at'])
+            raise
 
-        raise XUIError(
-            'ساخت کلاینت در 3x-ui ناموفق بود. '
-            f'email={email}, inbound_id={inbound_id}. '
-            f'خطاها: ' + ' | '.join(errors[-6:])
+        uri = str(self._pick(blob, self.SUB_KEYS['uri']) or '').strip()
+        detected: dict[str, Any] = {}
+
+        if uri:
+            # subURI is the full base the panel advertises; trust it whole.
+            rest = uri.split('://', 1)
+            detected['scheme'] = rest[0] if len(rest) == 2 and rest[0] in ('http', 'https') else 'https'
+            body = rest[-1].rstrip('/')
+            host, _, path = body.partition('/')
+            domain, _, port = host.partition(':')
+            detected['domain'] = domain
+            if port.isdigit():
+                detected['port'] = int(port)
+            detected['path'] = '/' + path.strip('/') + '/' if path else '/sub/'
+        else:
+            port = self._pick(blob, self.SUB_KEYS['port'])
+            path = self._pick(blob, self.SUB_KEYS['path'])
+            domain = self._pick(blob, self.SUB_KEYS['domain'])
+            cert = self._pick(blob, self.SUB_KEYS['cert'])
+            if port not in (None, ''):
+                try:
+                    detected['port'] = int(port)
+                except (TypeError, ValueError):
+                    pass
+            if path:
+                detected['path'] = '/' + str(path).strip('/') + '/'
+            if domain:
+                detected['domain'] = str(domain).strip().strip('/')
+            # A certificate configured for the subscription server is the only
+            # honest signal that it answers on https.
+            detected['scheme'] = 'https' if cert else 'http'
+
+        # Scheme alone is a guess, not an answer: without a port, path or domain
+        # nothing useful was actually read, and saying otherwise would send the
+        # operator looking for a problem somewhere else.
+        found_anything = any(detected.get(key) for key in ('port', 'path', 'domain'))
+        if not found_anything:
+            detected = {}
+        else:
+            enabled = self._pick(blob, self.SUB_KEYS['enable'])
+            detected['enabled'] = bool(enabled) if enabled is not None else True
+
+        self.panel.sub_detected = detected
+        self.panel.sub_note = (
+            ('خوانده شد: ' + ' '.join(f'{k}={v}' for k, v in detected.items()))[:300]
+            if detected else
+            'تنظیمات Subscription در پاسخ پنل پیدا نشد. روش را «دستی» بگذارید و مقادیر را وارد کنید.'
         )
+        self.panel.save(update_fields=['sub_detected', 'sub_note', 'updated_at'])
+        return detected
 
     def reset_client_traffic(self, email: str) -> bool:
         """Zero a client's used up/down counters.
