@@ -183,6 +183,40 @@ class XUIClient:
             raise XUIError(str(last_error))
         return []
 
+    def get_client_sub_id(self, email: str) -> str:
+        """The Subscription ID the panel actually gave this client.
+
+        Provisioning asks for subId to equal the client's name, but the panel is
+        free to keep its own. The subscription URL is keyed on whatever the
+        panel decided, so it is read back instead of assumed — guessing wrong
+        hands the customer a subscription link that resolves to nothing.
+        """
+        try:
+            result = self.get_client(email)
+        except XUIError:
+            return ''
+
+        def find(node, depth=0):
+            if depth > 4:
+                return ''
+            if isinstance(node, dict):
+                for key in ('subId', 'sub_id', 'subID'):
+                    value = str(node.get(key) or '').strip()
+                    if value:
+                        return value
+                for value in node.values():
+                    found = find(value, depth + 1)
+                    if found:
+                        return found
+            if isinstance(node, list):
+                for item in node:
+                    found = find(item, depth + 1)
+                    if found:
+                        return found
+            return ''
+
+        return find(result)
+
     def get_sub_links(self, sub_id: str) -> list[str]:
         """Every link behind one subscription id."""
         if not sub_id:

@@ -935,7 +935,7 @@ class OrderAdmin(ModelAdmin):
         'amount_toman', 'discount_code', 'expires_at', 'created_at',
     )
     list_filter = ('status', 'source', 'service', 'plan', 'discount_code')
-    search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid')
+    search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid', 'xui_sub_id')
     actions = [resend_order_config, provision_and_send, refresh_traffic_state]
 
     @admin.display(description='وضعیت اشتراک')
@@ -951,7 +951,7 @@ class OrderAdmin(ModelAdmin):
     readonly_fields = ('config_link_click', 'subscription_link_click', 'qr_preview', 'created_at', 'updated_at')
     fieldsets = (
         ('سفارش', {'fields': ('user', 'service', 'plan', 'source', 'status', 'amount_usd', 'amount_toman', 'discount_code', 'discount_toman', 'admin_note')}),
-        ('تحویل 3x-ui', {'fields': ('xui_client_uuid', 'xui_client_email', 'expires_at', 'traffic_ended_at', 'traffic_bytes', 'user_limit')}),
+        ('تحویل 3x-ui', {'fields': ('xui_client_uuid', 'xui_client_email', 'xui_sub_id', 'expires_at', 'traffic_ended_at', 'traffic_bytes', 'user_limit')}),
         ('لینک‌ها', {'fields': ('config_link', 'subscription_link', 'config_link_click', 'subscription_link_click', 'qr_image', 'qr_preview')}),
         ('زمان‌ها', {'fields': ('created_at', 'updated_at')}),
     )

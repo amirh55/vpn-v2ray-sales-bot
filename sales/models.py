@@ -328,12 +328,20 @@ class Service(TimeStampedModel):
     config_link_template = models.TextField(
         'قالب لینک کانفیگ، اختیاری',
         blank=True,
-        help_text='متغیرها: {uuid}, {email}, {inbound_id}, {panel_base_url}, {subscription_base_url}, {service_name}, {plan_name}',
+        help_text=(
+            'خالی بگذارید؛ لینک مستقیماً از خود پنل گرفته می‌شود. '
+            'متغیرها: {uuid}, {email}, {sub_id}, {inbound_id}, {inbound_ids}, '
+            '{panel_base_url}, {subscription_base_url}, {service_name}, {plan_name}'
+        ),
     )
     subscription_link_template = models.TextField(
         'قالب لینک Subscription، اختیاری',
         blank=True,
-        help_text='مثال: https://sub.example.com/sub/{email} یا هر الگویی که در پنل شما استفاده می‌شود.',
+        help_text=(
+            'خالی بگذارید؛ خودکار از تنظیمات Subscription پنل ساخته می‌شود. '
+            'اگر پر می‌کنید، از {sub_id} استفاده کنید نه {email}: لینک Subscription در 3x-ui '
+            'با «Subscription ID» کلاینت ساخته می‌شود. مثال: https://sub.example.com:2096/sub/{sub_id}'
+        ),
     )
 
     class Meta:
@@ -578,6 +586,10 @@ class Order(TimeStampedModel):
     amount_toman = models.DecimalField('مبلغ تومان', max_digits=18, decimal_places=0)
     xui_client_uuid = models.CharField('UUID کلاینت', max_length=80, blank=True)
     xui_client_email = models.CharField('Email/شناسه کلاینت در 3x-ui', max_length=150, blank=True)
+    # What the subscription URL is keyed on. Usually the same as the client
+    # name, because that is what provisioning asks for, but the panel is free to
+    # mint its own — so it is read back rather than assumed.
+    xui_sub_id = models.CharField('Subscription ID در پنل', max_length=150, blank=True)
     expires_at = models.DateTimeField('تاریخ انقضا', null=True, blank=True)
     # Stamped by the sweep that reads usage from the panel. Traffic running out
     # ends a subscription just as surely as the date passing, but only the panel

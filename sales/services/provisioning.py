@@ -18,7 +18,7 @@ def gb_to_bytes(gb: Decimal) -> int:
     return int(Decimal(gb) * Decimal(1024 ** 3))
 
 
-def render_template(template: str, *, order: Order, client_uuid: str, client_email: str) -> str:
+def render_template(template: str, *, order: Order, client_uuid: str, client_email: str, sub_id: str = '') -> str:
     if not template:
         return ''
     panel = order.service.panel
@@ -26,6 +26,9 @@ def render_template(template: str, *, order: Order, client_uuid: str, client_ema
         'uuid': client_uuid,
         'client_id': client_uuid,
         'email': client_email,
+        # The subscription URL is keyed on this, not on the client name, even
+        # though provisioning asks the panel to make them the same.
+        'sub_id': sub_id or client_email,
         'inbound_id': order.service.inbound_id,
         'inbound_ids': ','.join(str(i) for i in order.service.inbound_id_list()),
         'panel_base_url': panel.base_url.rstrip('/'),
@@ -78,7 +81,9 @@ def build_client_payload(order: Order, client_uuid: str, client_email: str, expi
     }
 
 
-def build_links(order: Order, xui: 'XUIClient', *, client_uuid: str, client_email: str) -> tuple[str, str]:
+def build_links(
+    order: Order, xui: 'XUIClient', *, client_uuid: str, client_email: str, sub_id: str = ''
+) -> tuple[str, str]:
     """The config and subscription links to hand the customer.
 
     The panel is asked first. It is the only party that knows the inbound's
@@ -90,10 +95,12 @@ def build_links(order: Order, xui: 'XUIClient', *, client_uuid: str, client_emai
     specific link shape keeps control. Templates are otherwise optional now.
     """
     config_link = render_template(
-        order.service.config_link_template, order=order, client_uuid=client_uuid, client_email=client_email
+        order.service.config_link_template,
+        order=order, client_uuid=client_uuid, client_email=client_email, sub_id=sub_id,
     )
     subscription_link = render_template(
-        order.service.subscription_link_template, order=order, client_uuid=client_uuid, client_email=client_email
+        order.service.subscription_link_template,
+        order=order, client_uuid=client_uuid, client_email=client_email, sub_id=sub_id,
     )
 
     if not config_link:
@@ -106,9 +113,7 @@ def build_links(order: Order, xui: 'XUIClient', *, client_uuid: str, client_emai
         config_link = '\n'.join(links)
 
     if not subscription_link:
-        # subId is what the panel keys a subscription on, and provisioning sets
-        # it to the client's name, so the customer's chosen name is the link.
-        subscription_link = order.service.panel.subscription_url(client_email)
+        subscription_link = order.service.panel.subscription_url(sub_id or client_email)
 
     return config_link, subscription_link
 
@@ -191,11 +196,17 @@ def provision_order(order: Order) -> Order:
     if actual_uuid:
         client_uuid = actual_uuid
 
+    # Ask the panel what it actually keyed the subscription on. It normally
+    # honours the subId we sent, but a build that mints its own would otherwise
+    # leave the customer with a subscription link pointing at nothing.
+    sub_id = xui.get_client_sub_id(client_email) or client_email
+
     order.xui_client_uuid = client_uuid
     order.xui_client_email = client_email
+    order.xui_sub_id = sub_id
     order.expires_at = expires_at
     order.config_link, order.subscription_link = build_links(
-        order, xui, client_uuid=client_uuid, client_email=client_email
+        order, xui, client_uuid=client_uuid, client_email=client_email, sub_id=sub_id
     )
     qr_data = order.subscription_link or order.config_link or f'{client_email}'
     order.qr_image.save(f'order_{order.pk}_qr.png', make_qr_content_file(qr_data, f'order_{order.pk}_qr.png'), save=False)
