@@ -17,6 +17,9 @@ CONF_DIR="${CONF_DIR:-/etc/vpnshop}"
 ENV_FILE="$CONF_DIR/vpnshop.env"
 CLI_CONF="$CONF_DIR/cli.conf"
 PORT="${PORT:-8000}"
+# 443 means the panel owns the standard HTTPS port. Set 8443 when x-ui needs
+# 80 and 443 for itself; Telegram accepts 443, 80, 88 and 8443 for webhooks.
+PANEL_HTTPS_PORT="${PANEL_HTTPS_PORT:-443}"
 DOMAIN="${DOMAIN:-}"
 WEB_SERVICE="vpnshop-web"
 BOT_SERVICE="vpnshop-bot"
@@ -256,8 +259,12 @@ green "دستور vpnshop نصب شد."
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   step "باز کردن پورت در فایروال"
   if [ -n "$DOMAIN" ]; then
-    ufw allow 80/tcp >/dev/null 2>&1 || true
-    ufw allow 443/tcp >/dev/null 2>&1 || true
+    if [ "$PANEL_HTTPS_PORT" = "443" ]; then
+      ufw allow 80/tcp >/dev/null 2>&1 || true
+      ufw allow 443/tcp >/dev/null 2>&1 || true
+    else
+      ufw allow "$PANEL_HTTPS_PORT/tcp" >/dev/null 2>&1 || true
+    fi
   else
     ufw allow "$PORT/tcp" >/dev/null 2>&1 || true
   fi
@@ -273,9 +280,12 @@ if [ -n "$DOMAIN" ]; then
   fi
 
   if command -v nginx >/dev/null 2>&1; then
+    # On any port other than 443 the panel must leave 80 alone: that port
+    # belongs to whatever else runs here, usually x-ui and its certificate
+    # renewals.
     cat > "/etc/nginx/conf.d/vpnshop.conf" <<EOF
 server {
-    listen 80;
+    listen $PANEL_HTTPS_PORT;
     server_name $DOMAIN;
     client_max_body_size 20m;
 

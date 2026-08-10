@@ -45,6 +45,18 @@ class SiteSetting(TimeStampedModel):
         default=True,
         help_text='اگر روی دامنه گواهی SSL دارید روشن بماند.',
     )
+    # Telegram only delivers webhooks to 443, 80, 88 or 8443, so this is not a
+    # free choice: a server whose 443 belongs to x-ui has to put the panel on
+    # 8443 (or 88) for the bot's webhook mode to keep working.
+    panel_https_port = models.PositiveIntegerField(
+        'پورت پنل روی اینترنت',
+        default=443,
+        help_text=(
+            'اگر پورت ۴۴۳ و ۸۰ را برای x-ui می‌خواهید، اینجا ۸۴۴۳ بگذارید تا پنل با آن‌ها تداخل نکند. '
+            'تلگرام فقط پورت‌های ۴۴۳، ۸۰، ۸۸ و ۸۴۴۳ را برای Webhook قبول می‌کند. '
+            'بعد از تغییر، روی سرور «vpnshop domain» را بزنید.'
+        ),
+    )
     ssl_cert_path = models.CharField(
         'مسیر فایل گواهی SSL',
         max_length=500,

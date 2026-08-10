@@ -17,7 +17,11 @@ from telebot import TeleBot, types
 
 from sales.models import SiteSetting
 from sales.services.botcore import build_bot
-from sales.services.site_urls import public_base_url, telegram_webhook_url
+from sales.services.site_urls import (
+    TELEGRAM_WEBHOOK_PORTS,
+    public_base_url,
+    telegram_webhook_url,
+)
 
 _bot: TeleBot | None = None
 _bot_token: str = ''
@@ -68,6 +72,14 @@ def set_webhook() -> tuple[bool, str]:
         return False, (
             f'آدرس فعلی «{public_base_url()}» با https نیست. '
             'تلگرام وبهوک بدون HTTPS را نمی‌پذیرد. ابتدا دامنه و SSL را تنظیم کنید.'
+        )
+    port = int(site.panel_https_port or 443)
+    if port not in TELEGRAM_WEBHOOK_PORTS:
+        allowed = '، '.join(str(p) for p in TELEGRAM_WEBHOOK_PORTS)
+        return False, (
+            f'پنل روی پورت {port} است و تلگرام فقط به پورت‌های {allowed} وبهوک می‌فرستد.\n'
+            'یا «پورت پنل روی اینترنت» را به ۸۴۴۳ تغییر دهید و «vpnshop domain» را بزنید، '
+            'یا حالت Webhook را خاموش کنید تا ربات با Polling کار کند.'
         )
 
     bot = TeleBot(token)

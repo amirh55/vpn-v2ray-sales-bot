@@ -55,6 +55,47 @@
   </div>
 
   <div class="bg-white border border-base-200 p-6 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
+    <h2 class="font-semibold text-lg mb-2 text-font-important-light dark:text-font-important-dark">
+      پورت پنل و تداخل با x-ui
+    </h2>
+    <p class="mb-3 text-font-subtle-light dark:text-font-subtle-dark">
+      پنل الان روی پورت <b>{{ panel_port }}</b> است.
+    </p>
+
+    {% if owns_standard_ports %}
+      <div class="bg-amber-50 border border-amber-300 p-4 rounded-default dark:bg-amber-950 dark:border-amber-800">
+        <p class="text-amber-800 dark:text-amber-300">
+          ⚠️ با این تنظیم، Nginx پورت‌های <b>۸۰</b> و <b>۴۴۳</b> را می‌گیرد. اگر این پورت‌ها را
+          برای x-ui می‌خواهید، یا اگر موقع گرفتن گواهی SSL پیام
+          «tcp port 80 is already used by nginx» می‌گیرید، «پورت پنل روی اینترنت» را
+          <b>۸۴۴۳</b> بگذارید و ذخیره کنید، سپس روی سرور <code>vpnshop domain</code> را بزنید.
+        </p>
+      </div>
+    {% else %}
+      <div class="bg-green-50 border border-green-300 p-4 rounded-default dark:bg-green-950 dark:border-green-800">
+        <p class="text-green-700 dark:text-green-300">
+          ✅ پنل پورت ۸۰ و ۴۴۳ را نمی‌گیرد، پس این دو برای x-ui و گرفتن گواهی SSL آزاد هستند.
+        </p>
+      </div>
+    {% endif %}
+
+    {% if webhook_mode_on and not telegram_port_ok %}
+      <div class="bg-red-50 border border-red-300 mt-3 p-4 rounded-default dark:bg-red-950 dark:border-red-800">
+        <p class="text-red-700 dark:text-red-300">
+          ⛔️ حالت Webhook تلگرام روشن است، اما تلگرام فقط به پورت‌های {{ telegram_ports }}
+          وبهوک می‌فرستد و پورت فعلی پنل جزو آن‌ها نیست. یا پورت را ۸۴۴۳ کنید،
+          یا در تنظیمات ربات حالت Webhook را خاموش کنید تا با Polling کار کند.
+        </p>
+      </div>
+    {% endif %}
+
+    <p class="mt-3 text-sm text-font-subtle-light dark:text-font-subtle-dark">
+      برای دیدن اینکه همین حالا چه برنامه‌ای هر پورت را گرفته، روی سرور بزنید:
+      <code>vpnshop ports</code>
+    </p>
+  </div>
+
+  <div class="bg-white border border-base-200 p-6 rounded-default shadow-xs dark:bg-base-900 dark:border-base-800">
     <h2 class="font-semibold text-lg mb-4 text-font-important-light dark:text-font-important-dark">
       وضعیت فعلی
     </h2>

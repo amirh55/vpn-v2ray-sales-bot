@@ -22,11 +22,13 @@ from .services.lifecycle import sweep_all as sweep_finished_services
 from .services.provisioning import provision_order
 from .services import reports
 from .services.site_urls import (
+    TELEGRAM_WEBHOOK_PORTS,
     admin_url,
     certificate_status,
     domain_is_live,
     oxapay_webhook_url,
     sms_webhook_url,
+    telegram_port_is_supported,
     telegram_webhook_url,
 )
 from .services.telegram_webhook import delete_webhook, set_webhook, webhook_status
@@ -56,7 +58,13 @@ class DomainForm(forms.ModelForm):
 
     class Meta:
         model = SiteSetting
-        fields = ('public_domain', 'force_https', 'ssl_cert_path', 'ssl_key_path')
+        fields = ('public_domain', 'panel_https_port', 'force_https', 'ssl_cert_path', 'ssl_key_path')
+
+    def clean_panel_https_port(self):
+        port = int(self.cleaned_data.get('panel_https_port') or 443)
+        if not 1 <= port <= 65535:
+            raise forms.ValidationError('پورت باید عددی بین ۱ تا ۶۵۵۳۵ باشد.')
+        return port
 
     def clean_public_domain(self):
         value = (self.cleaned_data.get('public_domain') or '').strip().strip('/')
@@ -447,6 +455,13 @@ class SiteSettingAdmin(ModelAdmin):
             'cert_rows': certificate_status(site),
             'domain_live': domain_is_live(site),
             'has_domain': bool(site.public_domain),
+            'panel_port': int(site.panel_https_port or 443),
+            'owns_standard_ports': int(site.panel_https_port or 443) == 443,
+            # A port Telegram will not deliver to is worth saying out loud,
+            # because webhook mode simply goes quiet rather than erroring.
+            'telegram_port_ok': telegram_port_is_supported(site),
+            'telegram_ports': '، '.join(str(p) for p in TELEGRAM_WEBHOOK_PORTS),
+            'webhook_mode_on': site.telegram_use_webhook,
         }
         return TemplateResponse(request, 'admin/sales/domain.html', context)
 

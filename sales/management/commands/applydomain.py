@@ -8,6 +8,7 @@ This command is what `vpnshop domain` runs.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,15 +37,20 @@ def update_env_file(path: Path, values: dict[str, str]) -> None:
     path.write_text('\n'.join(kept).strip() + '\n', encoding='utf-8')
     os.chmod(path, 0o600)
 
-TEMPLATE = """# ساخته‌شده توسط vpnshop domain — دستی ویرایش نکنید
-server {{
+# Only emitted when the panel owns 443. On any other port the panel must not
+# touch port 80 at all, because that port belongs to something else — usually
+# x-ui, which also needs it free for its own certificate renewals.
+REDIRECT_BLOCK = """server {{
     listen 80;
     server_name {domain};
     return 301 https://$host$request_uri;
 }}
 
-server {{
-    listen 443 ssl;
+"""
+
+TEMPLATE = """# ساخته‌شده توسط vpnshop domain — دستی ویرایش نکنید
+{redirect}server {{
+    listen {https_port} ssl;
     http2 on;
     server_name {domain};
     client_max_body_size 25m;
@@ -64,7 +70,7 @@ server {{
 
 PLAIN_TEMPLATE = """# ساخته‌شده توسط vpnshop domain — دستی ویرایش نکنید
 server {{
-    listen 80;
+    listen {https_port};
     server_name {domain};
     client_max_body_size 25m;
 
@@ -77,6 +83,27 @@ server {{
     }}
 }}
 """
+
+
+def port_owner(port: int) -> str:
+    """Which program is listening on a port, as a short readable name.
+
+    Nginx binding a port that x-ui already holds fails at reload with a message
+    most operators never see, so the clash is reported before anything is
+    written.
+    """
+    try:
+        out = subprocess.run(
+            ['ss', '-lptnH', f'sport = :{port}'], capture_output=True, text=True, timeout=10
+        ).stdout
+    except Exception:  # noqa: BLE001
+        return ''
+    names = []
+    for match in re.finditer(r'users:\(\("([^"]+)"', out):
+        name = match.group(1)
+        if name not in names:
+            names.append(name)
+    return '، '.join(names)
 
 
 class Command(BaseCommand):
@@ -116,12 +143,17 @@ class Command(BaseCommand):
                     self.stdout.write(self.style.ERROR(f'  {row["label"]}: {row["note"]} ({row["path"]})'))
                 raise CommandError('فایل‌های گواهی قابل استفاده نیستند؛ مسیرها را بررسی کنید.')
 
+        https_port = int(site.panel_https_port or 443)
         template = TEMPLATE if use_ssl else PLAIN_TEMPLATE
         config = template.format(
             domain=domain,
             cert=site.ssl_cert_path.strip(),
             key=site.ssl_key_path.strip(),
             port=options['port'],
+            https_port=https_port,
+            # Grabbing port 80 for a redirect is only right when this panel is
+            # also the thing answering on 443.
+            redirect=REDIRECT_BLOCK.format(domain=domain) if (use_ssl and https_port == 443) else '',
         )
 
         if options['print_only']:
@@ -130,6 +162,23 @@ class Command(BaseCommand):
 
         if os.geteuid() != 0:
             raise CommandError('این دستور باید با کاربر root اجرا شود.')
+
+        # Refuse before writing anything, rather than leaving nginx unable to
+        # start because the port belongs to someone else.
+        owner = port_owner(https_port)
+        if owner and 'nginx' not in owner:
+            raise CommandError(
+                f'پورت {https_port} همین حالا در اختیار «{owner}» است، پس Nginx نمی‌تواند آن را بگیرد. '
+                'در پنل، «دامنه و SSL» → «پورت پنل روی اینترنت» را به پورت آزادی مثل ۸۴۴۳ تغییر دهید '
+                'و دوباره این دستور را بزنید.'
+            )
+        if use_ssl and https_port == 443:
+            eighty = port_owner(80)
+            if eighty and 'nginx' not in eighty:
+                raise CommandError(
+                    f'پورت ۸۰ در اختیار «{eighty}» است و این تنظیم می‌خواهد آن را برای ریدایرکت بگیرد. '
+                    'اگر پورت ۸۰ و ۴۴۳ را برای x-ui می‌خواهید، «پورت پنل روی اینترنت» را ۸۴۴۳ بگذارید.'
+                )
 
         if not shutil_which('nginx'):
             self.stdout.write('Nginx نصب نیست؛ در حال نصب...')
@@ -141,10 +190,12 @@ class Command(BaseCommand):
         # Django must be told to answer for this host, or every request to the
         # new domain comes back as a 400 no matter how nginx is configured.
         scheme = 'https' if use_ssl else 'http'
+        default_port = 443 if scheme == 'https' else 80
+        shown_port = '' if https_port == default_port else f':{https_port}'
         hosts = [domain, '127.0.0.1', 'localhost']
         update_env_file(ENV_FILE, {
             'ALLOWED_HOSTS': ','.join(hosts),
-            'PUBLIC_BASE_URL': f'{scheme}://{domain}',
+            'PUBLIC_BASE_URL': f'{scheme}://{domain}{shown_port}',
         })
         self.stdout.write(f'فایل تنظیمات به‌روز شد: {ENV_FILE}')
 
@@ -180,7 +231,17 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f'دامنه {domain} اعمال شد.'))
         self.stdout.write(f'تنظیمات Nginx: {NGINX_CONF}')
-        self.stdout.write(f'آدرس پنل: {scheme}://{domain}/{django_settings.ADMIN_PATH}')
+        self.stdout.write(f'آدرس پنل: {scheme}://{domain}{shown_port}/{django_settings.ADMIN_PATH}')
+        if https_port != 443:
+            self.stdout.write(
+                f'پنل روی پورت {https_port} است، پس پورت ۸۰ و ۴۴۳ آزاد ماندند و '
+                'می‌توانید آن‌ها را به x-ui بدهید.'
+            )
+        if https_port not in (443, 80, 88, 8443):
+            self.stdout.write(self.style.WARNING(
+                f'تلگرام روی پورت {https_port} وبهوک نمی‌فرستد. فقط ۴۴۳، ۸۰، ۸۸ و ۸۴۴۳ را قبول می‌کند. '
+                'یا پورت را عوض کنید یا ربات را روی حالت Polling بگذارید.'
+            ))
         if not use_ssl:
             self.stdout.write(self.style.WARNING(
                 'بدون SSL تنظیم شد. برای امنیت مسیر مخفی پنل، حتما گواهی را فعال کنید.'

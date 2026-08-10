@@ -172,6 +172,36 @@ EOF
   yellow "برای اینکه واقعا ارسال شود، در پنل «ارسال گزارش فروش به مدیر» را روشن کنید."
 }
 
+cmd_ports() {
+  # «چه چیزی پورت ۸۰ را گرفته؟» — سوالی که موقع گرفتن گواهی SSL پیش می‌آید
+  echo "  پورت‌های در حال استفاده:"
+  for prt in 80 443 8443 88; do
+    local line
+    line="$(ss -lptnH "sport = :$prt" 2>/dev/null | head -1)"
+    if [ -n "$line" ]; then
+      red "    $prt: در اختیار $(echo "$line" | grep -oP 'users:\(\("\K[^"]+' | head -1)"
+    else
+      green "    $prt: آزاد"
+    fi
+  done
+  echo ""
+  echo "  برای گرفتن گواهی با acme.sh در حالت standalone، پورت ۸۰ باید آزاد باشد."
+  echo "  اگر nginx آن را گرفته و پورت ۸۰ را برای x-ui می‌خواهید:"
+  echo "    در پنل «دامنه و SSL» → «پورت پنل روی اینترنت» را ۸۴۴۳ کنید، بعد: vpnshop domain"
+}
+
+cmd_freeport() {
+  # توقف موقت nginx برای گرفتن گواهی، و برگرداندن آن در هر حالت
+  need_root
+  yellow "Nginx موقتا متوقف می‌شود تا پورت ۸۰ آزاد شود..."
+  systemctl stop nginx
+  green "پورت ۸۰ آزاد شد. حالا در ترمینال دیگری گواهی را بگیرید."
+  echo "بعد از اتمام، Enter بزنید تا Nginx برگردد."
+  read -r _ || true
+  systemctl start nginx
+  green "Nginx برگشت."
+}
+
 cmd_sweep() {
   # بررسی مصرف همه اشتراک‌ها از روی پنل و علامت زدن آن‌هایی که حجمشان تمام شده
   manage sweepservices
@@ -217,6 +247,8 @@ vpnshop - مدیریت ربات فروش VPN
   vpnshop reports           ثبت ارسال خودکار گزارش فروش در cron
   vpnshop report [daily|monthly]   ارسال فوری گزارش برای مدیر
   vpnshop sweep             بررسی فوری حجم مصرف‌شده اشتراک‌ها از روی پنل
+  vpnshop ports             نمایش اینکه چه برنامه‌ای پورت ۸۰، ۴۴۳ و ۸۴۴۳ را گرفته
+  vpnshop freeport          توقف موقت Nginx برای گرفتن گواهی SSL روی پورت ۸۰
   vpnshop backup            ساخت فایل پشتیبان از داده‌ها و فایل‌ها
   vpnshop restore <file>    بازگردانی از فایل پشتیبان و ری‌استارت سرویس‌ها
 EOF
@@ -242,6 +274,8 @@ main() {
     reports) cmd_reports "$@" ;;
     report) cmd_report_now "$@" ;;
     sweep) cmd_sweep "$@" ;;
+    ports) cmd_ports "$@" ;;
+    freeport) cmd_freeport "$@" ;;
     backup) cmd_backup "$@" ;;
     restore) cmd_restore "$@" ;;
     help|-h|--help) cmd_help ;;

@@ -17,6 +17,10 @@ from django.conf import settings as django_settings
 from sales.models import SiteSetting
 
 
+# The four ports Telegram is willing to deliver webhooks to.
+TELEGRAM_WEBHOOK_PORTS = (443, 80, 88, 8443)
+
+
 def public_base_url() -> str:
     site = SiteSetting.get_solo()
     domain = (site.public_domain or '').strip().strip('/')
@@ -26,7 +30,20 @@ def public_base_url() -> str:
     if domain.startswith(('http://', 'https://')):
         return domain.rstrip('/')
     scheme = 'https' if site.force_https else 'http'
-    return f'{scheme}://{domain}'
+    port = int(site.panel_https_port or 443)
+    # A non-standard port has to appear in every address handed to an outside
+    # system, or the callback lands on whatever else owns the default port.
+    default_port = 443 if scheme == 'https' else 80
+    suffix = '' if port == default_port else f':{port}'
+    return f'{scheme}://{domain}{suffix}'
+
+
+def telegram_port_is_supported(site: SiteSetting | None = None) -> bool:
+    """Whether Telegram will deliver webhooks to the port the panel runs on."""
+    site = site or SiteSetting.get_solo()
+    if not site.force_https:
+        return False
+    return int(site.panel_https_port or 443) in TELEGRAM_WEBHOOK_PORTS
 
 
 def admin_url() -> str:
