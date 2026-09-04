@@ -199,6 +199,35 @@ UNFOLD = {
                 ],
             },
             {
+                # The sidebar is a hand-written list, not a reflection of what
+                # is registered, so a model added to admin.py stays invisible
+                # until it is named here as well.
+                'title': _('همکاری در فروش'),
+                'separator': True,
+                'items': [
+                    {
+                        'title': _('همکاران فروش'),
+                        'icon': 'handshake',
+                        'link': reverse_lazy('admin:sales_partner_changelist'),
+                    },
+                    {
+                        'title': _('درخواست‌های همکاری'),
+                        'icon': 'how_to_reg',
+                        'link': reverse_lazy('admin:sales_partnerrequest_changelist'),
+                    },
+                    {
+                        'title': _('فاکتورهای همکاری'),
+                        'icon': 'receipt_long',
+                        'link': reverse_lazy('admin:sales_partnerinvoice_changelist'),
+                    },
+                    {
+                        'title': _('قیمت‌های اختصاصی همکاران'),
+                        'icon': 'sell',
+                        'link': reverse_lazy('admin:sales_partnerplanprice_changelist'),
+                    },
+                ],
+            },
+            {
                 'title': _('کاربران و پیام‌رسانی'),
                 'separator': True,
                 'items': [

@@ -166,6 +166,18 @@ class SiteSettingAdmin(ModelAdmin):
                 '{username} یوزرنیم، {balance} موجودی کیف پول.'
             ),
         }),
+        ('همکاری در فروش', {
+            'fields': (
+                'partner_program_enabled', 'partner_request_enabled', 'partner_default_cycle_days',
+                'partner_invoice_warn_hours', 'partner_delete_refund_hours',
+                'partner_request_intro_text', 'partner_panel_welcome_text',
+            ),
+            'description': (
+                'تا وقتی «سیستم همکاری در فروش فعال باشد» خاموش است، دستور /work برای همه '
+                'پیام «این بخش فعال نیست» می‌دهد و هیچ چیز دیگری در ربات تغییر نمی‌کند. '
+                'بعد از روشن کردن، همکاران را از بخش «همکاران فروش» بسازید.'
+            ),
+        }),
         ('متن‌ها', {'fields': ('tutorial_text', 'contact_intro_text', 'faq_intro_text', 'after_purchase_text')}),
         ('پشتیبان‌گیری', {'fields': ('backup_tools',)}),
     )
@@ -788,10 +800,18 @@ class ServiceAdmin(ModelAdmin):
 
 @admin.register(Plan)
 class PlanAdmin(ModelAdmin):
-    list_display = ('name', 'service', 'price_toman', 'price_usd', 'crypto_saving', 'duration_days', 'traffic_gb', 'user_limit', 'is_active')
+    list_display = (
+        'name', 'service', 'price_toman', 'price_usd', 'partner_price_toman',
+        'crypto_saving', 'duration_days', 'traffic_gb', 'user_limit', 'is_active',
+    )
     list_filter = ('is_active', 'service')
     search_fields = ('name', 'description', 'service__name')
-    list_editable = ('price_toman', 'price_usd', 'duration_days', 'traffic_gb', 'user_limit', 'is_active')
+    # Partner prices are edited from the list because they are usually set for
+    # every plan in one sitting, not one plan at a time.
+    list_editable = (
+        'price_toman', 'price_usd', 'partner_price_toman',
+        'duration_days', 'traffic_gb', 'user_limit', 'is_active',
+    )
 
     @admin.display(description='تخفیف کریپتو')
     def crypto_saving(self, obj):
