@@ -1009,6 +1009,75 @@ class XUIClient:
                 continue
         return False
 
+    def set_client_enabled(self, email: str, client_payload: dict[str, Any], enabled: bool) -> dict[str, Any]:
+        """Switch a client on or off without changing anything else about it.
+
+        The payload has to be complete, because `update_client` replaces the
+        client rather than patching it: sending `{'enable': False}` alone would
+        wipe the quota, the expiry and the IP limit. Callers rebuild the payload
+        from the order, so the database stays the authority on what was sold.
+        """
+        body = dict(client_payload)
+        body['enable'] = bool(enabled)
+        return self.update_client(email, body)
+
+    def delete_client(self, email: str, client_uuid: str = '') -> bool:
+        """Remove a client from every inbound it sits on.
+
+        Panels disagree about this route more than about any other: some take
+        the client's uuid under the inbound, older builds take the email, and
+        the path sits under either the API base or the panel root. Every known
+        shape is tried and the first success wins, which is the same approach
+        `add_client` already takes.
+
+        Returns True when at least one inbound accepted the delete. A client
+        that the panel no longer holds counts as deleted.
+        """
+        email = (email or '').strip()
+        if not email:
+            raise XUIError('برای حذف کلاینت، شناسه آن لازم است.')
+
+        inbound_ids: list[int] = []
+        try:
+            inbound_ids = self.client_inbound_ids(email)
+        except XUIError:
+            pass
+        if not inbound_ids:
+            found = self.find_client_by_identifier(email)
+            if found is None:
+                # Nothing to delete. Saying so plainly beats raising, because
+                # the caller's goal — this config is gone — already holds.
+                return True
+            inbound_ids = [found['inbound_id']]
+            client_uuid = client_uuid or found.get('identifier') or ''
+
+        attempts: list[str] = []
+        keys = [key for key in (client_uuid, email) if key]
+        for inbound_id in inbound_ids:
+            for key in keys:
+                for method, url in (
+                    ('POST', self._panel_url(f'/inbounds/{inbound_id}/delClient/{key}')),
+                    ('POST', self._panel_url(f'/inbounds/delClient/{inbound_id}/{key}')),
+                    ('POST', self._api_url(f'/inbounds/{inbound_id}/delClient/{key}')),
+                    ('POST', self._api_url(f'/clients/del/{key}')),
+                    ('POST', self._api_url(f'/clients/delete/{key}')),
+                    ('DELETE', self._api_url(f'/clients/{key}')),
+                ):
+                    try:
+                        self.request(method, url)
+                    except XUIError as exc:
+                        attempts.append(f'{method} {url}: {exc}')
+
+        # The panel's answer is not the test — whether the client is still there
+        # is. This covers builds that reply in a shape `_ok` does not recognise,
+        # and it is the only check that means anything to the caller.
+        if self.find_client_by_identifier(email) is None:
+            return True
+        raise XUIError(
+            'حذف کلاینت از پنل ناموفق بود. مسیر حذف این نسخه پنل شناسایی نشد: '
+            + ('; '.join(attempts[-3:]) or 'هیچ مسیری پاسخ نداد')
+        )
+
     def usage_by_email(self) -> dict[str, dict[str, int]]:
         """Live traffic counters for every client on this panel, in one request.
 

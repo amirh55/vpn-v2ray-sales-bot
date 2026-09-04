@@ -88,6 +88,20 @@ def approve_request(request: CardPaymentRequest, *, auto: bool, note: str = '') 
             locked.admin_note = (locked.admin_note + '\n' + note).strip()
         locked.save(update_fields=['status', 'auto_approved', 'admin_note', 'updated_at'])
 
+    # A transfer made to pay a partner invoice lands in the wallet like any
+    # other, then immediately settles the invoice. Going through the wallet
+    # rather than around it means one settlement path, and a transfer that
+    # arrives after the invoice was already paid simply leaves the money as
+    # credit instead of being lost.
+    if locked.partner_invoice_id:
+        from sales.services.partner_billing import PartnerBillingError, pay_invoice_from_wallet
+
+        try:
+            pay_invoice_from_wallet(locked.partner_invoice)
+        except PartnerBillingError as exc:
+            locked.admin_note = (locked.admin_note + f'\nتسویه فاکتور همکاری انجام نشد: {exc}').strip()
+            locked.save(update_fields=['admin_note', 'updated_at'])
+
     # Provisioning talks to the panel over the network, so it stays outside the
     # transaction. A failure here leaves the money in the wallet, where the
     # customer can spend it, rather than rolling back a confirmed payment.
@@ -121,6 +135,20 @@ def approve_request(request: CardPaymentRequest, *, auto: bool, note: str = '') 
 
 def notify_customer(request: CardPaymentRequest) -> bool:
     """Tell the customer their transfer landed, with the config when there is one."""
+    if request.partner_invoice_id:
+        invoice = request.partner_invoice
+        invoice.refresh_from_db()
+        if invoice.status == invoice.Status.PAID:
+            return send_text(
+                request.user.chat_id,
+                f'✅ واریز شما تایید و فاکتور {invoice.number} تسویه شد.\n'
+                'کانفیگ‌هایی که به دلیل این فاکتور غیرفعال شده بودند، دوباره فعال شدند.',
+            )
+        return send_text(
+            request.user.chat_id,
+            f'✅ واریز شما تایید و کیف پولتان شارژ شد، اما فاکتور {invoice.number} '
+            'خودکار تسویه نشد. از پنل همکاری، «پرداخت از کیف پول» را بزنید.',
+        )
     if request.created_order_id:
         return send_order(request.created_order)
     if request.auto_purchase_after_paid and request.pending_plan_id:

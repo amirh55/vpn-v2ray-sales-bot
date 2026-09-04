@@ -20,7 +20,7 @@ from .services.messaging import MessagingError, reply_to_support as send_support
 from .services.payments import settle_payment
 from .services.lifecycle import sweep_all as sweep_finished_services
 from .services.provisioning import provision_order
-from .services import reports
+from .services import jalali, reports
 from .services.site_urls import (
     TELEGRAM_WEBHOOK_PORTS,
     admin_url,
@@ -43,6 +43,11 @@ from .models import (
     FaqItem,
     LinkedService,
     Order,
+    Partner,
+    PartnerInvoice,
+    PartnerInvoiceItem,
+    PartnerPlanPrice,
+    PartnerRequest,
     Payment,
     Plan,
     Service,
@@ -931,17 +936,33 @@ def refresh_traffic_state(modeladmin, request, queryset):
 @admin.register(Order)
 class OrderAdmin(ModelAdmin):
     list_display = (
-        'id', 'user', 'service', 'plan', 'status', 'lifecycle_state',
+        'id', 'user', 'sold_by', 'service', 'plan', 'status', 'lifecycle_state',
         'amount_toman', 'discount_code', 'expires_at', 'created_at',
     )
-    list_filter = ('status', 'source', 'service', 'plan', 'discount_code')
-    search_fields = ('id', 'user__chat_id', 'user__username', 'xui_client_email', 'xui_client_uuid', 'xui_sub_id')
+    list_filter = ('status', 'source', 'partner', 'service', 'plan', 'discount_code')
+    search_fields = (
+        'id', 'user__chat_id', 'user__username', 'customer_label',
+        'partner__display_name', 'xui_client_email', 'xui_client_uuid', 'xui_sub_id',
+    )
     actions = [resend_order_config, provision_and_send, refresh_traffic_state]
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('partner', 'user', 'service', 'plan')
+
+    @admin.display(description='فروشنده')
+    def sold_by(self, obj):
+        """Who sold this, and to whom, when it did not go straight to a customer."""
+        if not obj.partner_id:
+            return 'فروش مستقیم'
+        customer = obj.customer_label or 'بدون نام'
+        return f'{obj.partner.display_name} → {customer}'
 
     @admin.display(description='وضعیت اشتراک')
     def lifecycle_state(self, obj):
         if obj.status != Order.Status.PROVISIONED:
             return '-'
+        if obj.suspended_at:
+            return '⛔️ غیرفعال بابت بدهی همکار'
         reason = obj.ended_reason()
         if not reason:
             return '✅ فعال'
@@ -951,6 +972,13 @@ class OrderAdmin(ModelAdmin):
     readonly_fields = ('config_link_click', 'subscription_link_click', 'qr_preview', 'created_at', 'updated_at')
     fieldsets = (
         ('سفارش', {'fields': ('user', 'service', 'plan', 'source', 'status', 'amount_usd', 'amount_toman', 'discount_code', 'discount_toman', 'admin_note')}),
+        ('همکاری در فروش', {
+            'fields': ('partner', 'customer_label', 'partner_base_toman', 'revenue_at', 'suspended_at', 'suspended_by_invoice'),
+            'description': (
+                'برای سفارش‌های فروش مستقیم خالی است. «زمان شناسایی درآمد» تا پرداخت '
+                'فاکتورِ سفارش اعتباری خالی می‌ماند و همان است که گزارش‌ها می‌خوانند.'
+            ),
+        }),
         ('تحویل 3x-ui', {'fields': ('xui_client_uuid', 'xui_client_email', 'xui_sub_id', 'expires_at', 'traffic_ended_at', 'traffic_bytes', 'user_limit')}),
         ('لینک‌ها', {'fields': ('config_link', 'subscription_link', 'config_link_click', 'subscription_link_click', 'qr_image', 'qr_preview')}),
         ('زمان‌ها', {'fields': ('created_at', 'updated_at')}),
@@ -1325,3 +1353,281 @@ class BroadcastAdmin(ModelAdmin):
                 f'ارسال به {result["total"]} کاربر شروع شد و در پس‌زمینه ادامه دارد. '
                 'برای دیدن نتیجه، کمی بعد همین صفحه را باز کنید.',
             )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# سیستم همکاری در فروش
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class PartnerPlanPriceInline(TabularInline):
+    model = PartnerPlanPrice
+    extra = 0
+    fields = ('plan', 'price_toman', 'price_usd')
+    verbose_name = 'قیمت اختصاصی پلن'
+    verbose_name_plural = 'قیمت‌های اختصاصی این همکار'
+
+
+@admin.action(description='فعال کردن همکار')
+def activate_partners(modeladmin, request, queryset):
+    messages.success(request, f'{queryset.update(is_active=True)} همکار فعال شد.')
+
+
+@admin.action(description='غیرفعال کردن همکار')
+def deactivate_partners(modeladmin, request, queryset):
+    """Close the panel without touching money or configs.
+
+    Cutting a partner's access is an access decision, not a billing one, so open
+    invoices stay open and live configs keep working.
+    """
+    count = queryset.update(is_active=False)
+    messages.success(
+        request,
+        f'{count} همکار غیرفعال شد. فاکتورها و کانفیگ‌های موجودشان دست‌نخورده مانده است.',
+    )
+
+
+@admin.register(Partner)
+class PartnerAdmin(ModelAdmin):
+    list_display = (
+        'display_name', 'chat_id', 'billing_mode', 'billing_cycle_days',
+        'credit_display', 'debt_display', 'discount_percent', 'is_active',
+    )
+    list_filter = ('is_active', 'billing_mode')
+    search_fields = ('display_name', 'user__chat_id', 'user__username', 'note')
+    filter_horizontal = ('allowed_services', 'allowed_plans')
+    readonly_fields = ('created_at', 'updated_at')
+    actions = [activate_partners, deactivate_partners]
+    inlines = [PartnerPlanPriceInline]
+    fieldsets = (
+        ('همکار', {'fields': ('user', 'display_name', 'is_active', 'note')}),
+        ('شرایط مالی', {
+            'fields': ('billing_mode', 'billing_cycle_days', 'credit_limit_toman', 'discount_percent'),
+            'description': (
+                'در «پرداخت فوری» کانفیگ فقط بعد از پرداخت ساخته می‌شود و فاکتوری در کار نیست. '
+                'در «اعتباری» کانفیگ بلافاصله ساخته می‌شود و مبلغ روی فاکتور دوره می‌نشیند.'
+            ),
+        }),
+        ('محدوده فروش', {
+            'fields': ('allowed_services', 'allowed_plans'),
+            'description': 'هر دو را خالی بگذارید تا همه پلن‌های فعال مجاز باشند.',
+        }),
+        ('زمان‌ها', {'fields': ('created_at', 'updated_at')}),
+    )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('user')
+
+    @admin.display(description='Chat ID', ordering='user__chat_id')
+    def chat_id(self, obj):
+        return obj.user.chat_id
+
+    @admin.display(description='سقف اعتبار')
+    def credit_display(self, obj):
+        if obj.credit_limit_toman <= 0:
+            return 'نامحدود'
+        remaining = obj.remaining_credit_toman()
+        return f'{int(obj.credit_limit_toman):,} (باقی: {int(remaining):,})'
+
+    @admin.display(description='بدهی جاری')
+    def debt_display(self, obj):
+        debt = obj.current_debt_toman()
+        if debt <= 0:
+            return 'ندارد'
+        if obj.overdue_invoice():
+            return format_html(
+                '<span style="color:#b91c1c;font-weight:600;">{} تومان ⚠️ معوق</span>',
+                f'{int(debt):,}',
+            )
+        return f'{int(debt):,} تومان'
+
+
+@admin.register(PartnerPlanPrice)
+class PartnerPlanPriceAdmin(ModelAdmin):
+    list_display = ('partner', 'plan', 'price_toman', 'effective_price', 'price_usd')
+    list_filter = ('partner', 'plan__service')
+    search_fields = ('partner__display_name', 'plan__name', 'plan__service__name')
+    list_editable = ('price_toman', 'price_usd')
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('partner', 'plan', 'plan__service')
+
+    @admin.display(description='قیمت نهایی با تخفیف همکار')
+    def effective_price(self, obj):
+        final = obj.partner.final_price_toman(obj.plan)
+        if not obj.partner.discount_percent:
+            return f'{int(final):,} تومان'
+        return f'{int(final):,} تومان (پس از {obj.partner.discount_percent}٪)'
+
+
+class PartnerInvoiceItemInline(TabularInline):
+    model = PartnerInvoiceItem
+    extra = 0
+    fields = ('kind', 'title', 'order', 'amount_toman', 'is_cancelled', 'cancel_reason', 'created_at')
+    readonly_fields = ('created_at',)
+    verbose_name = 'ردیف فاکتور'
+    verbose_name_plural = 'ردیف‌های فاکتور'
+
+
+@admin.action(description='💰 تسویه دستی فاکتور و فعال‌سازی کانفیگ‌ها')
+def settle_invoices_manually(modeladmin, request, queryset):
+    """Mark an invoice paid outside the bot — cash in hand, a transfer you saw.
+
+    Goes through the same settlement as every other route, so the configs this
+    invoice switched off come back the same way they would have.
+    """
+    from sales.services.partner_billing import settle_invoice
+
+    done = skipped = 0
+    for invoice in queryset.select_related('partner'):
+        if settle_invoice(invoice, via=PartnerInvoice.SettledBy.ADMIN, note=f'تسویه دستی توسط {request.user}'):
+            done += 1
+        else:
+            skipped += 1
+    if done:
+        messages.success(request, f'{done} فاکتور تسویه شد و کانفیگ‌های مربوط به آن‌ها فعال شدند.')
+    if skipped:
+        messages.info(request, f'{skipped} فاکتور از قبل تسویه یا لغو شده بود.')
+
+
+@admin.action(description='🔓 فعال‌سازی مجدد کانفیگ‌های این فاکتور')
+def reactivate_invoice_configs(modeladmin, request, queryset):
+    """Push the re-enable again for an invoice whose panel was down at the time."""
+    from sales.services.partner_billing import reactivate_invoice_orders
+
+    total = sum(reactivate_invoice_orders(invoice) for invoice in queryset)
+    messages.success(request, f'{total} کانفیگ دوباره فعال شد.')
+
+
+@admin.action(description='⛔️ غیرفعال‌سازی کانفیگ‌های این فاکتور')
+def suspend_invoice_configs(modeladmin, request, queryset):
+    from sales.services.partner_billing import suspend_invoice_orders
+
+    total = sum(suspend_invoice_orders(invoice) for invoice in queryset)
+    messages.success(request, f'{total} کانفیگ غیرفعال شد. هیچ کانفیگی حذف نشده است.')
+
+
+@admin.register(PartnerInvoice)
+class PartnerInvoiceAdmin(ModelAdmin):
+    list_display = ('number', 'partner', 'total_display', 'opened_display', 'due_display', 'status', 'paid_at')
+    list_filter = ('status', 'partner')
+    search_fields = ('number', 'partner__display_name', 'partner__user__chat_id')
+    readonly_fields = ('number', 'total_toman', 'total_usd', 'warned_at', 'suspended_at', 'created_at', 'updated_at')
+    actions = [settle_invoices_manually, reactivate_invoice_configs, suspend_invoice_configs]
+    inlines = [PartnerInvoiceItemInline]
+    fieldsets = (
+        ('فاکتور', {'fields': ('number', 'partner', 'status', 'total_toman', 'total_usd', 'admin_note')}),
+        ('دوره', {
+            'fields': ('opened_at', 'due_at', 'warned_at', 'suspended_at'),
+            'description': 'دوره از اولین سفارش شروع می‌شود. هشدار سررسید برای هر فاکتور فقط یک بار ارسال می‌شود.',
+        }),
+        ('تسویه', {'fields': ('paid_at', 'settled_by')}),
+        ('زمان‌ها', {'fields': ('created_at', 'updated_at')}),
+    )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('partner')
+
+    def has_add_permission(self, request):
+        # An invoice is opened by the first order of a cycle. A hand-made one
+        # would have no lines on it and no way to acquire any.
+        return False
+
+    @admin.display(description='جمع', ordering='total_toman')
+    def total_display(self, obj):
+        return f'{int(obj.total_toman):,} تومان'
+
+    @admin.display(description='شروع دوره', ordering='opened_at')
+    def opened_display(self, obj):
+        return jalali.format_datetime(obj.opened_at)
+
+    @admin.display(description='سررسید', ordering='due_at')
+    def due_display(self, obj):
+        text = jalali.format_datetime(obj.due_at)
+        if obj.status == PartnerInvoice.Status.OVERDUE:
+            return format_html('<span style="color:#b91c1c;font-weight:600;">{} ⚠️</span>', text)
+        return text
+
+
+@admin.register(PartnerInvoiceItem)
+class PartnerInvoiceItemAdmin(ModelAdmin):
+    list_display = ('invoice', 'kind', 'title', 'amount_toman', 'is_cancelled', 'created_at')
+    list_filter = ('kind', 'is_cancelled', 'invoice__partner')
+    search_fields = ('title', 'invoice__number', 'invoice__partner__display_name')
+    readonly_fields = ('created_at', 'updated_at')
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('invoice', 'invoice__partner', 'order')
+
+
+@admin.action(description='✅ تایید درخواست و ساخت همکار')
+def approve_partner_requests(modeladmin, request, queryset):
+    """Turn a request into a partner on the shop's default terms.
+
+    Prepaid with no credit, deliberately: extending credit is a decision the
+    operator should make per partner, not something that arrives by default with
+    an approval click.
+    """
+    site = SiteSetting.get_solo()
+    created = skipped = 0
+    for req in queryset.select_related('user'):
+        if req.status == PartnerRequest.Status.APPROVED:
+            skipped += 1
+            continue
+        if Partner.objects.filter(user=req.user).exists():
+            messages.warning(request, f'{req.full_name} از قبل همکار است؛ درخواستش فقط تایید شد.')
+        else:
+            Partner.objects.create(
+                user=req.user,
+                display_name=req.full_name[:120],
+                billing_mode=Partner.BillingMode.PREPAID,
+                billing_cycle_days=site.partner_default_cycle_days,
+                note=f'از درخواست همکاری #{req.pk}',
+            )
+            created += 1
+        req.status = PartnerRequest.Status.APPROVED
+        req.reviewed_at = timezone.now()
+        req.save(update_fields=['status', 'reviewed_at', 'updated_at'])
+
+    if created:
+        messages.success(
+            request,
+            f'{created} همکار ساخته شد، با شرایط «پرداخت فوری» و بدون اعتبار. '
+            'برای دادن اعتبار، در صفحه همکار نوع همکاری و سقف اعتبار را تنظیم کنید.',
+        )
+    if skipped:
+        messages.info(request, f'{skipped} درخواست از قبل تایید شده بود.')
+
+
+@admin.action(description='❌ رد درخواست')
+def reject_partner_requests(modeladmin, request, queryset):
+    count = queryset.exclude(status=PartnerRequest.Status.APPROVED).update(
+        status=PartnerRequest.Status.REJECTED, reviewed_at=timezone.now()
+    )
+    messages.success(request, f'{count} درخواست رد شد.')
+
+
+@admin.register(PartnerRequest)
+class PartnerRequestAdmin(ModelAdmin):
+    list_display = ('full_name', 'chat_id', 'phone', 'sales_channel', 'monthly_volume', 'status', 'created_at')
+    list_filter = ('status',)
+    search_fields = ('full_name', 'phone', 'sales_channel', 'user__chat_id', 'user__username')
+    readonly_fields = (
+        'user', 'full_name', 'phone', 'sales_channel', 'monthly_volume', 'note', 'created_at', 'updated_at',
+    )
+    actions = [approve_partner_requests, reject_partner_requests]
+    fieldsets = (
+        ('متقاضی', {'fields': ('user', 'full_name', 'phone', 'sales_channel', 'monthly_volume', 'note')}),
+        ('بررسی', {'fields': ('status', 'reviewed_at', 'admin_note')}),
+        ('زمان‌ها', {'fields': ('created_at', 'updated_at')}),
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('user')
+
+    @admin.display(description='Chat ID', ordering='user__chat_id')
+    def chat_id(self, obj):
+        return obj.user.chat_id

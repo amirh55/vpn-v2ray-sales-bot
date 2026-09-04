@@ -47,6 +47,27 @@ def settle_payment(payment: Payment, note: str = '') -> bool:
             description=f'شارژ کیف پول با {locked.get_provider_display()} / {locked.order_id}',
         )
 
+    # A gateway payment made to settle a partner invoice credits the wallet like
+    # any other and then pays the invoice out of it, so there is one settlement
+    # path whatever the money came in through.
+    if locked.partner_invoice_id:
+        from sales.services.partner_billing import PartnerBillingError, pay_invoice_from_wallet
+
+        try:
+            pay_invoice_from_wallet(locked.partner_invoice)
+            locked.partner_invoice.refresh_from_db()
+            send_text(
+                user.chat_id,
+                f'✅ پرداخت تایید و فاکتور {locked.partner_invoice.number} تسویه شد.\n'
+                'کانفیگ‌هایی که به دلیل این فاکتور غیرفعال شده بودند، دوباره فعال شدند.',
+            )
+        except PartnerBillingError as exc:
+            send_text(
+                user.chat_id,
+                f'پرداخت شما تایید و کیف پولتان شارژ شد، اما تسویه خودکار فاکتور انجام نشد.\n{exc}',
+            )
+        return True
+
     # Provisioning reaches the panel over the network, so it stays outside the
     # transaction: a failure there must not undo a confirmed payment.
     if locked.auto_purchase_after_paid and locked.pending_plan_id:

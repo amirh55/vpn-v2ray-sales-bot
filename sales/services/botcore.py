@@ -782,6 +782,39 @@ def watch_finished_services():
         time.sleep(600)
 
 
+def watch_partner_invoices(bot: TeleBot):
+    """Send the one due-date reminder, and act when a deadline passes.
+
+    Runs on a five-minute timer. The reminder window is hours wide, so the
+    exact tick does not matter; what matters is that `claim_warning` and
+    `claim_overdue` make each invoice's reminder and suspension happen once
+    even when two workers are running.
+    """
+    from sales.services import partner_billing
+
+    def send(chat_id, text):
+        try:
+            bot.send_message(chat_id, text, disable_web_page_preview=True)
+        except Exception:  # noqa: BLE001
+            # A partner who blocked the bot must not stop the sweep; the
+            # suspension still has to happen.
+            pass
+
+    while True:
+        try:
+            if get_site().partner_program_enabled:
+                result = partner_billing.run_billing_pass(send)
+                if result['overdue']:
+                    notify_operator(
+                        bot,
+                        f'⛔️ {result["overdue"]} فاکتور همکاری سررسید شد و '
+                        f'{result["suspended"]} کانفیگ غیرفعال شد.',
+                    )
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(300)
+
+
 def publish_commands(bot: TeleBot) -> None:
     """Fill Telegram's slash-command menu. Failure here is not fatal."""
     try:
@@ -810,6 +843,7 @@ def start_background_workers(bot: TeleBot) -> None:
     threading.Thread(target=process_queued_broadcasts, args=(bot,), daemon=True).start()
     threading.Thread(target=notify_auto_approved_cards, args=(bot,), daemon=True).start()
     threading.Thread(target=watch_finished_services, daemon=True).start()
+    threading.Thread(target=watch_partner_invoices, args=(bot,), daemon=True).start()
 
 
 def build_bot(token: str, *, with_workers: bool = True, threaded: bool = True) -> TeleBot:
@@ -835,6 +869,16 @@ def register_handlers(bot: TeleBot) -> None:
         user = ensure_user_from_message(message)
         reset_user_state(user)
         send_main_menu(bot, message.chat.id, user)
+
+    @bot.message_handler(commands=['work'])
+    def partner_panel(message):
+        from sales.services import partner_bot
+
+        user = ensure_user_from_message(message)
+        if user.is_blocked:
+            return
+        reset_user_state(user)
+        partner_bot.handle_work(bot, user, message.chat.id)
 
     @bot.message_handler(commands=['id'])
     def whoami(message):
@@ -872,6 +916,13 @@ def register_handlers(bot: TeleBot) -> None:
 
         state = user.state or ''
         site_now = get_site()
+
+        # The partner panel owns its own states. Asked first so a partner
+        # halfway through an order is not answered by the customer flow.
+        from sales.services import partner_bot
+
+        if partner_bot.handle_text(bot, user, message):
+            return
 
         if state == 'awaiting_contact':
             text = message.text or message.caption or '[فایل/تصویر بدون متن]'
@@ -1052,6 +1103,13 @@ def register_handlers(bot: TeleBot) -> None:
         if data == 'cancel':
             reset_user_state(user)
             edit_or_send(bot, call, 'به منوی اصلی برگشتید.')
+            return
+
+        # Routed before the shop-closed guard: a partner with an unpaid invoice
+        # must still be able to reach it while the shop is off.
+        from sales.services import partner_bot
+
+        if partner_bot.handle_callback(bot, user, call):
             return
 
         if not site_now.is_shop_active and data not in ['contact', 'tutorial', 'faq'] and not data.startswith('faq:'):

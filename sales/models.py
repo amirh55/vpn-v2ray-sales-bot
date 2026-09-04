@@ -155,6 +155,46 @@ class SiteSetting(TimeStampedModel):
     after_purchase_text = models.TextField('متن بعد از خرید موفق', blank=True, default='اشتراک شما با موفقیت ساخته شد.')
     is_shop_active = models.BooleanField('فروشگاه فعال باشد', default=True)
 
+    # ── سیستم همکاری در فروش ─────────────────────────────────────────────
+    partner_program_enabled = models.BooleanField(
+        'سیستم همکاری در فروش فعال باشد',
+        default=False,
+        help_text='تا وقتی خاموش است، دستور /work برای همه پیام «این بخش فعال نیست» می‌دهد.',
+    )
+    partner_request_enabled = models.BooleanField(
+        'ثبت درخواست همکاری باز باشد',
+        default=True,
+        help_text='خاموش کردن این گزینه فقط جلوی درخواست تازه را می‌گیرد؛ همکاران فعلی دست‌نخورده می‌مانند.',
+    )
+    partner_default_cycle_days = models.PositiveSmallIntegerField(
+        'مهلت پرداخت پیش‌فرض همکار / روز',
+        default=7,
+        help_text='برای همکار تازه‌ای که از روی درخواست ساخته می‌شود. بعداً برای هر همکار جداگانه قابل تغییر است.',
+    )
+    partner_invoice_warn_hours = models.PositiveSmallIntegerField(
+        'ارسال هشدار چند ساعت قبل از سررسید فاکتور',
+        default=24,
+        help_text='این هشدار برای هر فاکتور فقط یک بار ارسال می‌شود.',
+    )
+    partner_delete_refund_hours = models.PositiveSmallIntegerField(
+        'مهلت برگشت وجه بعد از حذف کانفیگ / ساعت',
+        default=24,
+        help_text=(
+            'اگر همکار کانفیگی را در این مهلت حذف کند و فاکتورش هنوز پرداخت نشده باشد، '
+            'مبلغ از فاکتور برداشته می‌شود. ۰ یعنی هیچ برگشتی انجام نشود.'
+        ),
+    )
+    partner_request_intro_text = models.TextField(
+        'متن معرفی همکاری برای کاربر عادی',
+        blank=True,
+        default='برای همکاری در فروش، اطلاعات زیر را ارسال کنید تا بررسی شود.',
+    )
+    partner_panel_welcome_text = models.TextField(
+        'متن بالای پنل همکار',
+        blank=True,
+        default='به پنل همکاری خوش آمدید.',
+    )
+
     class Meta:
         verbose_name = 'تنظیمات اصلی ربات'
         verbose_name_plural = 'تنظیمات اصلی ربات'
@@ -382,6 +422,22 @@ class Plan(TimeStampedModel):
     # customers towards crypto, so it is never derived from the toman price.
     price_toman = models.DecimalField('قیمت تومانی، برای کارت‌به‌کارت و کیف پول', max_digits=18, decimal_places=0, default=Decimal('0'))
     price_usd = models.DecimalField('قیمت دلاری، برای پرداخت کریپتو', max_digits=10, decimal_places=2)
+    # The first of the three partner pricing layers: a partner price that
+    # applies to every partner who has no price of their own for this plan.
+    partner_price_toman = models.DecimalField(
+        'قیمت همکاری / تومان',
+        max_digits=18,
+        decimal_places=0,
+        default=Decimal('0'),
+        help_text='۰ یعنی تعریف نشده؛ در آن صورت همکاران قیمت عادی این پلن را می‌بینند.',
+    )
+    partner_price_usd = models.DecimalField(
+        'قیمت همکاری / دلار',
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0'),
+        help_text='۰ یعنی از روی قیمت تومانی و نرخ دلار سایت حساب شود.',
+    )
     duration_days = models.PositiveIntegerField('مدت زمان / روز')
     traffic_gb = models.DecimalField('حجم / گیگابایت؛ ۰ یعنی نامحدود', max_digits=12, decimal_places=2, default=Decimal('0'))
     user_limit = models.PositiveIntegerField('تعداد کاربر / IP Limit', default=1)
@@ -576,6 +632,9 @@ class Order(TimeStampedModel):
         OXAPAY = 'oxapay', 'OxaPay'
         CARD = 'card', 'کارت‌به‌کارت'
         ADMIN = 'admin', 'ثبت دستی مدیر'
+        # Bought on credit by a partner: the config exists before any money has
+        # arrived, and the money arrives later through a PartnerInvoice.
+        PARTNER_CREDIT = 'partner_credit', 'اعتباری همکار'
 
     user = models.ForeignKey(TelegramUser, verbose_name='کاربر', on_delete=models.PROTECT, related_name='orders')
     service = models.ForeignKey(Service, verbose_name='سرویس', on_delete=models.PROTECT)
@@ -613,6 +672,48 @@ class Order(TimeStampedModel):
     discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
     admin_note = models.TextField('یادداشت مدیر', blank=True)
 
+    # ── سیستم همکاری ────────────────────────────────────────────────────
+    # A partner order still belongs to the partner's own TelegramUser: the
+    # person who will actually use the config has no Telegram account here, so
+    # they are recorded as a label rather than as a user.
+    partner = models.ForeignKey(
+        'Partner',
+        verbose_name='همکار فروشنده',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='orders',
+    )
+    customer_label = models.CharField(
+        'نام مشتری همکار',
+        max_length=120,
+        blank=True,
+        help_text='نامی که همکار برای مشتری نهایی وارد کرده. در Comment کانفیگ پنل هم ثبت می‌شود.',
+    )
+    # What this plan would have cost a normal customer at the moment of sale.
+    # amount_toman is what the partner was actually charged; the gap between
+    # them is the margin, and it has to be frozen here because plan prices move.
+    partner_base_toman = models.DecimalField(
+        'قیمت عادی در لحظه فروش / تومان', max_digits=18, decimal_places=0, default=Decimal('0')
+    )
+    # When this order's money became the shop's. For everything except a
+    # partner's credit order that is the moment it was created; for a credit
+    # order it is the moment its invoice was settled. Reports read this instead
+    # of created_at so an unpaid credit order cannot inflate revenue.
+    revenue_at = models.DateTimeField('زمان شناسایی درآمد', null=True, blank=True, db_index=True)
+    # Switched off in the panel because the partner's invoice went unpaid. The
+    # config is not deleted and nothing else about it is touched, so paying the
+    # invoice can put it back exactly as it was.
+    suspended_at = models.DateTimeField('زمان غیرفعال‌سازی بابت بدهی', null=True, blank=True)
+    suspended_by_invoice = models.ForeignKey(
+        'PartnerInvoice',
+        verbose_name='غیرفعال‌شده بابت فاکتور',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='suspended_orders',
+    )
+
     objects = OrderQuerySet.as_manager()
 
     class Meta:
@@ -623,9 +724,28 @@ class Order(TimeStampedModel):
     def __str__(self) -> str:
         return f'#{self.pk} {self.user.chat_id} {self.plan.name}'
 
+    def save(self, *args, **kwargs):
+        # Stamp the moment the money became the shop's, once. A partner's credit
+        # order is the one case where reaching PAID means nothing has arrived
+        # yet, so it is left unstamped until its invoice is settled.
+        if (
+            self.revenue_at is None
+            and self.source != self.Source.PARTNER_CREDIT
+            and self.status in (self.Status.PAID, self.Status.PROVISIONED)
+        ):
+            self.revenue_at = timezone.now()
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'revenue_at' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['revenue_at']
+        super().save(*args, **kwargs)
+
     @property
     def is_active(self) -> bool:
         if self.status != self.Status.PROVISIONED or self.traffic_ended_at is not None:
+            return False
+        # Switched off over an unpaid partner invoice. It is not finished — the
+        # dates and quota are untouched — but it is not working either.
+        if self.suspended_at is not None:
             return False
         return self.expires_at is None or self.expires_at > timezone.now()
 
@@ -686,6 +806,7 @@ class Payment(TimeStampedModel):
     class Purpose(models.TextChoices):
         WALLET_TOPUP = 'wallet_topup', 'شارژ کیف پول'
         DIRECT_ORDER = 'direct_order', 'پرداخت مستقیم سفارش'
+        PARTNER_INVOICE = 'partner_invoice', 'پرداخت فاکتور همکاری'
 
     user = models.ForeignKey(TelegramUser, verbose_name='کاربر', on_delete=models.PROTECT, related_name='payments')
     provider = models.CharField('درگاه/روش', max_length=20, choices=Provider.choices, default=Provider.OXAPAY)
@@ -710,6 +831,16 @@ class Payment(TimeStampedModel):
     )
     discount_toman = models.DecimalField('تخفیف اعمال‌شده / تومان', max_digits=18, decimal_places=0, default=Decimal('0'))
     client_name = models.CharField('نام کاربری انتخاب‌شده برای کانفیگ', max_length=64, blank=True)
+    # Set when purpose is PARTNER_INVOICE: settling this payment settles that
+    # invoice instead of topping up a wallet.
+    partner_invoice = models.ForeignKey(
+        'PartnerInvoice',
+        verbose_name='فاکتور همکاری',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='payments',
+    )
     raw_payload = models.JSONField('Payload خام', default=dict, blank=True)
 
     class Meta:
@@ -790,6 +921,15 @@ class CardPaymentRequest(TimeStampedModel):
     )
     # The webhook settles payments in the web process, which has no bot loop.
     # This marks whether the customer has already been told.
+    # Set when the partner is paying an invoice by card rather than topping up.
+    partner_invoice = models.ForeignKey(
+        'PartnerInvoice',
+        verbose_name='فاکتور همکاری',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='card_requests',
+    )
     notified_at = models.DateTimeField('زمان اطلاع‌رسانی به کاربر', null=True, blank=True)
     admin_note = models.TextField('یادداشت مدیر', blank=True)
 
@@ -937,3 +1077,405 @@ class Broadcast(TimeStampedModel):
     @property
     def is_single_target(self) -> bool:
         return bool((self.target_chat_id or '').strip())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# سیستم همکاری در فروش
+#
+# A partner resells the same plans to their own customers. Deliberately none of
+# this replaces the sales machinery: a partner's order is an ordinary Order, it
+# is provisioned by the ordinary provisioner, and it is renewed, resent and
+# swept exactly like anybody else's. What is added is who sold it, at what
+# price, and — for partners who buy on credit — which invoice the money for it
+# is going to arrive on.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Partner prices are rounded down to a whole number of thousands. Rounding up
+# would charge more than the number the operator agreed with the partner, and
+# that is not a conversation worth having over 400 toman.
+PRICE_STEP_TOMAN = Decimal('1000')
+
+
+def round_down_toman(value) -> Decimal:
+    """Round a toman price down to the nearest whole thousand."""
+    amount = Decimal(value or 0)
+    if amount <= 0:
+        return Decimal('0')
+    return (amount // PRICE_STEP_TOMAN) * PRICE_STEP_TOMAN
+
+
+class Partner(TimeStampedModel):
+    """A reseller, and the terms they sell on.
+
+    Identity is the Telegram account, so access is decided by chat id rather
+    than by the `/work` command being hard to guess.
+    """
+
+    class BillingMode(models.TextChoices):
+        PREPAID = 'prepaid', 'پرداخت فوری'
+        CREDIT = 'credit', 'اعتباری، تسویه دوره‌ای'
+
+    user = models.OneToOneField(
+        TelegramUser, verbose_name='حساب تلگرام', on_delete=models.CASCADE, related_name='partner'
+    )
+    display_name = models.CharField(
+        'نام همکار',
+        max_length=120,
+        help_text='همین نام در Comment کانفیگ‌های 3x-ui ثبت می‌شود، پس انگلیسی و کوتاه بهتر است.',
+    )
+    is_active = models.BooleanField(
+        'فعال',
+        default=True,
+        help_text='غیرفعال کردن، دسترسی به پنل همکار را می‌بندد ولی فاکتورها و کانفیگ‌های موجود را دست نمی‌زند.',
+    )
+    billing_mode = models.CharField(
+        'نوع همکاری', max_length=20, choices=BillingMode.choices, default=BillingMode.PREPAID
+    )
+    billing_cycle_days = models.PositiveSmallIntegerField(
+        'مهلت پرداخت / روز',
+        default=7,
+        help_text='دوره از اولین سفارش شروع می‌شود، نه از اول ماه. فقط برای همکاری اعتباری معنی دارد.',
+    )
+    credit_limit_toman = models.DecimalField(
+        'سقف اعتبار / تومان',
+        max_digits=18,
+        decimal_places=0,
+        default=Decimal('0'),
+        help_text='۰ یعنی نامحدود. سفارشی که باعث عبور از این سقف شود، رد می‌شود.',
+    )
+    discount_percent = models.PositiveSmallIntegerField(
+        'درصد تخفیف همکار',
+        default=0,
+        help_text='روی قیمت همکاری اعمال می‌شود، نه روی قیمت عادی. مثال: قیمت همکاری ۳۵۰٬۰۰۰ با ۱۰٪ می‌شود ۳۱۵٬۰۰۰.',
+    )
+    allowed_services = models.ManyToManyField(
+        Service,
+        verbose_name='سرویس‌های مجاز',
+        blank=True,
+        related_name='partners',
+        help_text='خالی بگذارید تا همه سرویس‌ها مجاز باشند.',
+    )
+    allowed_plans = models.ManyToManyField(
+        Plan,
+        verbose_name='پلن‌های مجاز',
+        blank=True,
+        related_name='partners',
+        help_text='برای استثنای پلنی. اگر پر باشد بر «سرویس‌های مجاز» مقدم است.',
+    )
+    note = models.TextField('یادداشت مدیر', blank=True)
+
+    class Meta:
+        verbose_name = 'همکار فروش'
+        verbose_name_plural = 'همکاران فروش'
+        ordering = ['display_name']
+
+    def __str__(self) -> str:
+        return f'{self.display_name} ({self.user.chat_id})'
+
+    # ── پلن‌های مجاز ──────────────────────────────────────────────────────
+
+    def available_plans(self):
+        """The plans this partner may sell, most specific rule winning.
+
+        Two fields rather than one because operators think in services — "this
+        partner sells Germany" — but occasionally need to carve out a single
+        plan, and ticking five plans to say one service is tedious enough that
+        it gets skipped.
+        """
+        plans = Plan.objects.filter(is_active=True, service__is_active=True)
+        if self.pk is None:
+            return plans
+        if self.allowed_plans.exists():
+            return plans.filter(pk__in=self.allowed_plans.values('pk'))
+        if self.allowed_services.exists():
+            return plans.filter(service__in=self.allowed_services.values('pk'))
+        return plans
+
+    def may_sell(self, plan) -> bool:
+        return self.available_plans().filter(pk=plan.pk).exists()
+
+    # ── قیمت‌گذاری سه‌لایه ────────────────────────────────────────────────
+
+    def base_price_toman(self, plan) -> Decimal:
+        """The partner price before this partner's own discount percentage.
+
+        Three layers, most specific first: a price set for this partner on this
+        plan, then the plan's general partner price, then the ordinary price.
+        """
+        override = self.plan_prices.filter(plan=plan).first()
+        if override and override.price_toman > 0:
+            return Decimal(override.price_toman)
+        if plan.partner_price_toman and plan.partner_price_toman > 0:
+            return Decimal(plan.partner_price_toman)
+        return Decimal(plan.price_toman)
+
+    def final_price_toman(self, plan) -> Decimal:
+        base = self.base_price_toman(plan)
+        if self.discount_percent:
+            base = base * (Decimal(100) - Decimal(self.discount_percent)) / Decimal(100)
+        return round_down_toman(base)
+
+    def base_price_usd(self, plan) -> Decimal:
+        override = self.plan_prices.filter(plan=plan).first()
+        if override and override.price_usd > 0:
+            return Decimal(override.price_usd)
+        if plan.partner_price_usd and plan.partner_price_usd > 0:
+            return Decimal(plan.partner_price_usd)
+        return Decimal('0')
+
+    def final_price_usd(self, plan) -> Decimal:
+        """The crypto price, derived from toman when no dollar price is set.
+
+        Deriving rather than falling back to the plan's own dollar price keeps
+        the two prices telling the same story: a partner who pays 315,000 toman
+        should not be quoted the retail dollar figure at the gateway.
+        """
+        base = self.base_price_usd(plan)
+        if base > 0:
+            if self.discount_percent:
+                base = base * (Decimal(100) - Decimal(self.discount_percent)) / Decimal(100)
+            return base.quantize(Decimal('0.01'))
+        rate = Decimal(SiteSetting.get_solo().dollar_rate_toman or 0)
+        if rate <= 0:
+            return Decimal(plan.price_usd)
+        return (self.final_price_toman(plan) / rate).quantize(Decimal('0.01'))
+
+    def saving_toman(self, plan) -> Decimal:
+        """What the partner saves against the ordinary price, for showing them."""
+        return max(Decimal('0'), Decimal(plan.price_toman) - self.final_price_toman(plan))
+
+    # ── بدهی و اعتبار ─────────────────────────────────────────────────────
+
+    def open_invoice(self):
+        """The invoice new orders should join, if a cycle is running."""
+        return (
+            self.invoices.filter(
+                status__in=[PartnerInvoice.Status.OPEN, PartnerInvoice.Status.OVERDUE]
+            )
+            .order_by('-opened_at')
+            .first()
+        )
+
+    def overdue_invoice(self):
+        """The one thing that blocks new orders.
+
+        An invoice that is merely open does not: the whole point of a billing
+        cycle is that several orders land on the same invoice before it is due.
+        """
+        return self.invoices.filter(status=PartnerInvoice.Status.OVERDUE).order_by('opened_at').first()
+
+    def current_debt_toman(self) -> Decimal:
+        total = self.invoices.filter(
+            status__in=[PartnerInvoice.Status.OPEN, PartnerInvoice.Status.OVERDUE]
+        ).aggregate(total=models.Sum('total_toman'))['total']
+        return Decimal(total or 0)
+
+    def remaining_credit_toman(self):
+        """Credit left, or None when the limit is unlimited."""
+        limit = Decimal(self.credit_limit_toman or 0)
+        if limit <= 0:
+            return None
+        return limit - self.current_debt_toman()
+
+    def is_within_credit(self, amount_toman) -> bool:
+        remaining = self.remaining_credit_toman()
+        if remaining is None:
+            return True
+        return Decimal(amount_toman or 0) <= remaining
+
+
+class PartnerPlanPrice(TimeStampedModel):
+    """A price agreed with one partner for one plan.
+
+    The most specific of the three pricing layers.
+    """
+
+    partner = models.ForeignKey(
+        Partner, verbose_name='همکار', on_delete=models.CASCADE, related_name='plan_prices'
+    )
+    plan = models.ForeignKey(
+        Plan, verbose_name='پلن', on_delete=models.CASCADE, related_name='partner_prices'
+    )
+    price_toman = models.DecimalField(
+        'قیمت اختصاصی / تومان', max_digits=18, decimal_places=0, default=Decimal('0')
+    )
+    price_usd = models.DecimalField(
+        'قیمت اختصاصی / دلار',
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0'),
+        help_text='۰ یعنی از روی قیمت تومانی و نرخ دلار سایت حساب شود.',
+    )
+
+    class Meta:
+        verbose_name = 'قیمت اختصاصی همکار'
+        verbose_name_plural = 'قیمت‌های اختصاصی همکاران'
+        unique_together = ('partner', 'plan')
+        ordering = ['partner__display_name', 'plan__service__sort_order', 'plan__sort_order']
+
+    def __str__(self) -> str:
+        return f'{self.partner.display_name} / {self.plan}'
+
+
+class PartnerInvoice(TimeStampedModel):
+    """One billing cycle for one partner.
+
+    Born with the cycle's first order, never before: an invoice with nothing on
+    it would only give the partner a due date for no reason. Everything the
+    partner orders until `due_at` joins this same invoice.
+    """
+
+    class Status(models.TextChoices):
+        OPEN = 'open', 'باز، در جریان'
+        OVERDUE = 'overdue', 'سررسید گذشته'
+        PAID = 'paid', 'پرداخت‌شده'
+        CANCELLED = 'cancelled', 'لغوشده'
+
+    class SettledBy(models.TextChoices):
+        WALLET = 'wallet', 'کیف پول'
+        CARD = 'card', 'کارت‌به‌کارت'
+        OXAPAY = 'oxapay', 'OxaPay'
+        ADMIN = 'admin', 'تسویه دستی مدیر'
+
+    partner = models.ForeignKey(
+        Partner, verbose_name='همکار', on_delete=models.PROTECT, related_name='invoices'
+    )
+    number = models.CharField('شماره فاکتور', max_length=32, unique=True, blank=True)
+    status = models.CharField('وضعیت', max_length=20, choices=Status.choices, default=Status.OPEN)
+    opened_at = models.DateTimeField('شروع دوره')
+    due_at = models.DateTimeField('سررسید')
+    total_toman = models.DecimalField(
+        'جمع فاکتور / تومان', max_digits=18, decimal_places=0, default=Decimal('0')
+    )
+    total_usd = models.DecimalField(
+        'جمع فاکتور / دلار', max_digits=12, decimal_places=2, default=Decimal('0')
+    )
+    # Filled the moment the reminder is queued, not after it is sent, so two
+    # workers racing cannot both send it. Point 8 asks for exactly one.
+    warned_at = models.DateTimeField('زمان ارسال هشدار سررسید', null=True, blank=True)
+    suspended_at = models.DateTimeField('زمان غیرفعال‌سازی کانفیگ‌ها', null=True, blank=True)
+    paid_at = models.DateTimeField('زمان پرداخت', null=True, blank=True)
+    settled_by = models.CharField('تسویه از راه', max_length=20, choices=SettledBy.choices, blank=True)
+    admin_note = models.TextField('یادداشت مدیر', blank=True)
+
+    class Meta:
+        verbose_name = 'فاکتور همکاری'
+        verbose_name_plural = 'فاکتورهای همکاری'
+        ordering = ['-opened_at']
+        indexes = [
+            models.Index(fields=['status', 'due_at']),
+            models.Index(fields=['partner', 'status']),
+        ]
+
+    def __str__(self) -> str:
+        return f'{self.number or "بدون شماره"} / {self.partner.display_name}'
+
+    def save(self, *args, **kwargs):
+        # The number is derived from the primary key, so it needs the row to
+        # exist first. Two writes, but only ever on creation, and no sequence
+        # table to race over.
+        creating = self.pk is None
+        super().save(*args, **kwargs)
+        if creating and not self.number:
+            self.number = f'INV-{self.pk:06d}'
+            super().save(update_fields=['number', 'updated_at'])
+
+    def recalculate_total(self, *, save: bool = True) -> Decimal:
+        """Re-add the live lines. Cancelled lines do not count."""
+        totals = self.items.filter(is_cancelled=False).aggregate(
+            toman=models.Sum('amount_toman'), usd=models.Sum('amount_usd')
+        )
+        self.total_toman = Decimal(totals['toman'] or 0)
+        self.total_usd = Decimal(totals['usd'] or 0)
+        if save:
+            super().save(update_fields=['total_toman', 'total_usd', 'updated_at'])
+        return self.total_toman
+
+    @property
+    def is_settled(self) -> bool:
+        return self.status in (self.Status.PAID, self.Status.CANCELLED)
+
+    @property
+    def is_payable(self) -> bool:
+        return self.status in (self.Status.OPEN, self.Status.OVERDUE) and self.total_toman > 0
+
+    def orders(self):
+        """The orders whose money is on this invoice, cancelled lines excluded."""
+        return Order.objects.filter(
+            pk__in=self.items.filter(is_cancelled=False)
+            .exclude(order__isnull=True)
+            .values('order_id')
+        )
+
+
+class PartnerInvoiceItem(TimeStampedModel):
+    """One charge on a partner's invoice.
+
+    A line rather than a foreign key on Order, because renewal does not create
+    an order — it moves the existing one's expiry date. Hanging the charge off
+    the order would silently merge two renewals in one cycle into a single
+    charge, and the shop would eat one of them.
+    """
+
+    class Kind(models.TextChoices):
+        NEW = 'new', 'سفارش جدید'
+        RENEW = 'renew', 'تمدید'
+        ADJUST = 'adjust', 'اصلاح دستی'
+
+    invoice = models.ForeignKey(
+        PartnerInvoice, verbose_name='فاکتور', on_delete=models.CASCADE, related_name='items'
+    )
+    order = models.ForeignKey(
+        Order,
+        verbose_name='سفارش',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='partner_invoice_items',
+    )
+    kind = models.CharField('نوع', max_length=20, choices=Kind.choices, default=Kind.NEW)
+    title = models.CharField('شرح', max_length=200)
+    # Frozen at the moment of sale. A plan whose price changes mid-cycle must
+    # not rewrite an invoice the partner has already been quoted.
+    amount_toman = models.DecimalField('مبلغ / تومان', max_digits=18, decimal_places=0)
+    amount_usd = models.DecimalField('مبلغ / دلار', max_digits=10, decimal_places=2, default=Decimal('0'))
+    is_cancelled = models.BooleanField('لغوشده', default=False)
+    cancelled_at = models.DateTimeField('زمان لغو', null=True, blank=True)
+    cancel_reason = models.CharField('دلیل لغو', max_length=200, blank=True)
+
+    class Meta:
+        verbose_name = 'ردیف فاکتور همکاری'
+        verbose_name_plural = 'ردیف‌های فاکتور همکاری'
+        ordering = ['invoice', 'created_at']
+
+    def __str__(self) -> str:
+        return f'{self.title} — {self.amount_toman}'
+
+
+class PartnerRequest(TimeStampedModel):
+    """A customer asking to become a partner."""
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'در انتظار بررسی'
+        APPROVED = 'approved', 'تایید شده'
+        REJECTED = 'rejected', 'رد شده'
+
+    user = models.ForeignKey(
+        TelegramUser, verbose_name='کاربر', on_delete=models.CASCADE, related_name='partner_requests'
+    )
+    full_name = models.CharField('نام و نام خانوادگی', max_length=120)
+    phone = models.CharField('شماره تماس', max_length=20, blank=True)
+    sales_channel = models.CharField('کانال یا محل فروش', max_length=200, blank=True)
+    monthly_volume = models.CharField('حدود فروش ماهانه', max_length=100, blank=True)
+    note = models.TextField('توضیح متقاضی', blank=True)
+    status = models.CharField('وضعیت', max_length=20, choices=Status.choices, default=Status.PENDING)
+    reviewed_at = models.DateTimeField('زمان بررسی', null=True, blank=True)
+    admin_note = models.TextField('یادداشت مدیر', blank=True)
+
+    class Meta:
+        verbose_name = 'درخواست همکاری'
+        verbose_name_plural = 'درخواست‌های همکاری'
+        ordering = ['-created_at']
+
+    def __str__(self) -> str:
+        return f'{self.full_name} ({self.user.chat_id})'

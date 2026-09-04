@@ -59,11 +59,27 @@ def make_safe_xui_email(order: Order, client_uuid: str) -> str:
     return safe[:64] or f'u{client_uuid.replace("-", "")[:12]}'
 
 
+def partner_comment(order: Order) -> str:
+    """What to write in the panel's Comment field for this client.
+
+    So that months later, looking at a config in 3x-ui alone, it is clear who
+    sold it and to whom. Empty for a direct sale, which leaves the field as it
+    was before partners existed.
+    """
+    parts = []
+    if order.customer_label:
+        parts.append(f'Customer: {order.customer_label}')
+    if order.partner_id:
+        parts.append(f'Partner: {order.partner.display_name}')
+    return ' | '.join(parts)
+
+
 def build_client_payload(order: Order, client_uuid: str, client_email: str, expires_at) -> dict:
     if not client_email or not str(client_email).strip():
         raise XUIError('شناسه client email برای 3x-ui خالی است.')
     expiry_ms = int(expires_at.timestamp() * 1000) if expires_at else 0
     return {
+        'comment': partner_comment(order),
         'id': str(client_uuid),
         'alterId': 0,
         'email': str(client_email).strip(),
@@ -215,6 +231,42 @@ def provision_order(order: Order) -> Order:
     return order
 
 
+def extend_order(order: Order, plan: Plan, price_toman: Decimal, price_usd: Decimal) -> Order:
+    """Move a subscription onto a new period. The caller handles the money.
+
+    Shared by the wallet renewal and the partner renewal so the two can never
+    drift apart on what "renewed" means to the dates and the quota.
+    """
+    # Renewing a subscription that still has time left adds to it; renewing one
+    # that already ran out starts the new period from now, so the customer does
+    # not pay for days that already passed.
+    base_expiry = order.expires_at if order.expires_at and order.expires_at > timezone.now() else timezone.now()
+    order.expires_at = base_expiry + timezone.timedelta(days=plan.duration_days)
+    order.traffic_bytes = gb_to_bytes(plan.traffic_gb)
+    # The new period comes with its own quota, so whatever ended the old one no
+    # longer applies.
+    order.traffic_ended_at = None
+    order.user_limit = plan.user_limit
+    order.plan = plan
+    order.amount_usd = price_usd
+    order.amount_toman = price_toman
+    order.status = Order.Status.PROVISIONED
+    order.save()
+    return order
+
+
+def push_renewal_to_panel(order: Order) -> None:
+    """Tell the panel about the new period, and clear the old usage."""
+    if not (order.xui_client_email and order.xui_client_uuid):
+        return
+    client = XUIClient(order.service.panel)
+    payload = build_client_payload(order, order.xui_client_uuid, order.xui_client_email, order.expires_at)
+    client.update_client(order.xui_client_email, payload)
+    # Without this the panel keeps the old usage against the new quota, and a
+    # customer who just renewed a used-up plan stays disconnected.
+    client.reset_client_traffic(order.xui_client_email)
+
+
 def renew_order_from_wallet(order: Order, plan: Plan) -> Order:
     with transaction.atomic():
         order = Order.objects.select_for_update().select_related('user', 'service', 'service__panel').get(pk=order.pk)
@@ -232,28 +284,67 @@ def renew_order_from_wallet(order: Order, plan: Plan) -> Order:
             order=order,
             description=f'تمدید پلن {plan.name}',
         )
-        # Renewing a subscription that still has time left adds to it; renewing
-        # one that already ran out starts the new period from now, so the
-        # customer does not pay for days that already passed.
-        base_expiry = order.expires_at if order.expires_at and order.expires_at > timezone.now() else timezone.now()
-        new_expiry = base_expiry + timezone.timedelta(days=plan.duration_days)
-        order.expires_at = new_expiry
-        order.traffic_bytes = gb_to_bytes(plan.traffic_gb)
-        # The new period comes with its own quota, so whatever ended the old one
-        # no longer applies.
-        order.traffic_ended_at = None
-        order.user_limit = plan.user_limit
-        order.plan = plan
-        order.amount_usd = plan.price_usd
-        order.amount_toman = price
-        order.status = Order.Status.PROVISIONED
-        order.save()
+        extend_order(order, plan, price, Decimal(plan.price_usd))
 
-    if order.xui_client_email and order.xui_client_uuid:
-        client = XUIClient(order.service.panel)
-        payload = build_client_payload(order, order.xui_client_uuid, order.xui_client_email, order.expires_at)
-        client.update_client(order.xui_client_email, payload)
-        # Without this the panel keeps the old usage against the new quota, and
-        # a customer who just renewed a used-up plan stays disconnected.
-        client.reset_client_traffic(order.xui_client_email)
+    push_renewal_to_panel(order)
     return order
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# سفارش همکار
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def create_partner_order(
+    partner,
+    plan: Plan,
+    *,
+    quote,
+    customer_label: str = '',
+    client_name: str = '',
+    on_credit: bool,
+) -> Order:
+    """Open an order a partner is selling on.
+
+    An ordinary Order in every way that matters — the same provisioner, the same
+    renewal, the same sweep — carrying who sold it and at what price. A credit
+    order is left unstamped for revenue: it is provisioned before any money has
+    arrived, and the money arrives on an invoice later.
+    """
+    return Order.objects.create(
+        user=partner.user,
+        service=plan.service,
+        plan=plan,
+        partner=partner,
+        customer_label=(customer_label or '').strip(),
+        source=Order.Source.PARTNER_CREDIT if on_credit else Order.Source.WALLET,
+        # PAID rather than PENDING so the provisioner will take it. For a credit
+        # order that means "the shop has agreed to supply it", not "paid".
+        status=Order.Status.PAID,
+        amount_usd=quote.final_usd,
+        amount_toman=quote.final_toman,
+        partner_base_toman=quote.list_toman,
+        traffic_bytes=gb_to_bytes(plan.traffic_gb),
+        user_limit=plan.user_limit,
+        xui_client_email=(client_name or '').strip(),
+    )
+
+
+def set_order_client_enabled(order: Order, enabled: bool) -> None:
+    """Switch a delivered config on or off in the panel.
+
+    The payload is rebuilt from the order rather than read back from the panel,
+    so re-enabling restores what was actually sold even if somebody edited the
+    client by hand in the meantime.
+    """
+    if not (order.xui_client_email and order.xui_client_uuid):
+        return
+    payload = build_client_payload(order, order.xui_client_uuid, order.xui_client_email, order.expires_at)
+    XUIClient(order.service.panel).set_client_enabled(order.xui_client_email, payload, enabled)
+
+
+def delete_order_client(order: Order) -> bool:
+    """Remove the config from the panel. The order row stays as the record."""
+    if not order.xui_client_email:
+        return True
+    return XUIClient(order.service.panel).delete_client(order.xui_client_email, order.xui_client_uuid)
